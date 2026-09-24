@@ -1,0 +1,6 @@
+{
+  "name": "Organizador Inteligente de Produção",
+  "description": "Planejador inteligente e preventivo de produção para designers, criadores de conteúdo e editores de vídeo com cálculo de etapas, margem de segurança e assistente de produção.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
