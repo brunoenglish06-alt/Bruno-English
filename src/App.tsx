@@ -95,17 +95,43 @@ export default function App() {
     const unsubTasks = subscribeTasks(activeGroupId, (serverTasks) => {
       if (serverTasks && serverTasks.length > 0) {
         setTasks((prev) => {
-          // Merge server tasks with local tasks by ID
-          const map = new Map<string, Task>();
-          for (const t of prev) {
-            if (t && t.id) map.set(t.id, t);
-          }
+          // If server has tasks, server is authoritative for the group
+          const serverMap = new Map<string, Task>();
           for (const st of serverTasks) {
-            if (st && st.id) map.set(st.id, st);
+            if (st && st.id) serverMap.set(st.id, st);
           }
-          const merged = Array.from(map.values());
+
+          // Retain any brand-new locally created tasks that haven't reached server yet
+          for (const t of prev) {
+            if (t && t.id && !serverMap.has(t.id)) {
+              const ageMs = Date.now() - new Date(t.createdAt || 0).getTime();
+              if (ageMs < 20000) {
+                serverMap.set(t.id, t);
+                syncTaskToFirestore(t).catch(() => {});
+              }
+            }
+          }
+
+          const merged = deduplicateTasks(Array.from(serverMap.values()));
           saveTasks(merged);
           return merged;
+        });
+
+        // Instantly update open task modal if another user modified it in real-time
+        setSelectedTask((current) => {
+          if (!current) return null;
+          const fresh = serverTasks.find((t) => t.id === current.id);
+          return fresh || current;
+        });
+      } else if (serverTasks && serverTasks.length === 0) {
+        // If Firestore tasks collection is empty, seed it with current local tasks so other users receive them
+        setTasks((prev) => {
+          if (prev && prev.length > 0) {
+            for (const t of prev) {
+              syncTaskToFirestore(t).catch(() => {});
+            }
+          }
+          return prev;
         });
       }
     });
