@@ -167,6 +167,17 @@ export function saveCustomSpecialty(spec: SpecialtyDefinition): void {
   }
 }
 
+export function addCustomSpecialty(name: string, category: string = 'other'): void {
+  const trimmed = name.trim();
+  if (!trimmed) return;
+  saveCustomSpecialty({
+    id: 'custom_' + Date.now(),
+    name: trimmed,
+    category,
+    isCustom: true
+  });
+}
+
 export function findSpecialty(nameOrId?: string): SpecialtyDefinition | undefined {
   if (!nameOrId) return undefined;
   const list = getSpecialties();

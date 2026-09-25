@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   LayoutDashboard,
   CalendarDays,
@@ -9,9 +9,12 @@ import {
   Plus,
   Calendar,
   Users,
-  FolderKanban
+  RefreshCw,
+  UserCheck,
+  ChevronDown
 } from 'lucide-react';
-import { RiskLevel, WorkGroup } from '../types';
+import { RiskLevel, WorkGroupMember } from '../types';
+import { PresenceInfo } from '../services/firestoreService';
 
 interface NavbarProps {
   currentTab: 'dashboard' | 'today' | 'calendar' | 'approvals' | 'team' | 'assistant';
@@ -25,6 +28,11 @@ interface NavbarProps {
   todayTasksCount: number;
   activeGroupName?: string;
   teamMembersCount?: number;
+  teamMembers?: WorkGroupMember[];
+  currentMemberName?: string;
+  onChangeMemberName?: (name: string) => void;
+  presence?: PresenceInfo;
+  onForceSync?: () => Promise<void>;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -38,8 +46,40 @@ export const Navbar: React.FC<NavbarProps> = ({
   pendingApprovalsCount,
   todayTasksCount,
   activeGroupName = 'Equipe de Design',
-  teamMembersCount = 3
+  teamMembersCount = 3,
+  teamMembers = [],
+  currentMemberName = 'Bruno',
+  onChangeMemberName,
+  presence,
+  onForceSync
 }) => {
+  const [isOnlineMenuOpen, setIsOnlineMenuOpen] = useState(false);
+  const [isSyncingNow, setIsSyncingNow] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setIsOnlineMenuOpen(false);
+      }
+    };
+    if (isOnlineMenuOpen) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [isOnlineMenuOpen]);
+
+  const handleManualSync = async () => {
+    if (!onForceSync) return;
+    setIsSyncingNow(true);
+    try {
+      await onForceSync();
+    } finally {
+      setTimeout(() => setIsSyncingNow(false), 400);
+    }
+  };
+
+  const onlineCount = presence?.onlineCount || 1;
   return (
     <header className="sticky top-0 z-30 bg-[#FFFFFF] border-b border-[#EDE4DA] shadow-[0_1px_3px_rgba(0,0,0,0.03)]">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -160,16 +200,113 @@ export const Navbar: React.FC<NavbarProps> = ({
 
           {/* Zone 3: Actions */}
           <div className="flex items-center gap-2.5">
-            {/* Real-time sync badge */}
-            <div
-              title="Sincronização em tempo real ativa: alterações de qualquer pessoa da equipe aparecem instantaneamente para todos."
-              className="hidden lg:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-800 text-[11px] font-medium"
-            >
-              <span className="relative flex h-2 w-2">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
-              </span>
-              <span>Online em Tempo Real</span>
+            {/* Real-time sync badge & Member Identity selector */}
+            <div className="relative" ref={menuRef}>
+              <button
+                type="button"
+                onClick={() => setIsOnlineMenuOpen((prev) => !prev)}
+                title="Sincronização Online em Tempo Real • Clique para ver conectados ou alternar seu perfil na equipe"
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-emerald-50 hover:bg-emerald-100/80 border border-emerald-200 text-emerald-800 text-xs font-semibold transition-colors cursor-pointer"
+              >
+                <span className="relative flex h-2 w-2">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                </span>
+                <span className="hidden lg:inline">Online ({onlineCount})</span>
+                <span className="hidden sm:inline text-emerald-700 font-normal">•</span>
+                <span className="hidden sm:inline max-w-[90px] truncate">{currentMemberName}</span>
+                <ChevronDown className="w-3.5 h-3.5 text-emerald-700" />
+              </button>
+
+              {isOnlineMenuOpen && (
+                <div className="absolute right-0 mt-2 w-72 rounded-xl bg-white border border-[#EDE4DA] shadow-xl p-3.5 z-50 text-xs text-[#231815] space-y-3 animate-in fade-in zoom-in-95 duration-100">
+                  <div className="flex items-center justify-between border-b border-[#EDE4DA] pb-2.5">
+                    <div className="flex items-center gap-2">
+                      <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
+                      <div>
+                        <p className="font-bold text-[#231815]">Sincronização em Tempo Real</p>
+                        <p className="text-[11px] text-[#73645B]">
+                          {onlineCount} {onlineCount === 1 ? 'janela conectada' : 'janelas conectadas agora'}
+                        </p>
+                      </div>
+                    </div>
+                    {onForceSync && (
+                      <button
+                        type="button"
+                        onClick={handleManualSync}
+                        title="Forçar atualização imediata"
+                        className="p-1.5 rounded-lg border border-[#EDE4DA] hover:bg-[#FAF7F2] text-[#6A3102] cursor-pointer"
+                      >
+                        <RefreshCw className={`w-3.5 h-3.5 ${isSyncingNow ? 'animate-spin' : ''}`} />
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Select active team member identity for this browser */}
+                  {onChangeMemberName && (
+                    <div className="space-y-1.5">
+                      <label className="block text-[11px] font-bold text-[#5C4D44] uppercase tracking-wider">
+                        Seu Perfil nesta Página:
+                      </label>
+                      <div className="grid grid-cols-1 gap-1 max-h-40 overflow-y-auto pr-0.5">
+                        {(teamMembers.length > 0
+                          ? teamMembers
+                          : [
+                              { id: 'member-bruno', name: 'Bruno', specialty: 'Designer de Feed', email: '', role: 'admin' as const },
+                              { id: 'member-ana', name: 'Ana', specialty: 'Social Media', email: '', role: 'member' as const },
+                              { id: 'member-carlos', name: 'Carlos', specialty: 'Editor de Vídeo', email: '', role: 'member' as const }
+                            ]
+                        ).map((m) => {
+                          const isSelected = m.name.toLowerCase() === currentMemberName.toLowerCase();
+                          return (
+                            <button
+                              key={m.id}
+                              type="button"
+                              onClick={() => {
+                                onChangeMemberName(m.name);
+                                setIsOnlineMenuOpen(false);
+                              }}
+                              className={`w-full px-2.5 py-1.5 rounded-lg text-left flex items-center justify-between transition-colors cursor-pointer ${
+                                isSelected
+                                  ? 'bg-[#6A3102]/10 text-[#6A3102] font-bold border border-[#6A3102]/25'
+                                  : 'hover:bg-[#FAF7F2] text-[#231815] border border-transparent'
+                              }`}
+                            >
+                              <div className="truncate">
+                                <span className="block truncate">{m.name}</span>
+                                <span className="text-[10px] text-[#8C7A70] font-normal block truncate">
+                                  {m.specialty}
+                                </span>
+                              </div>
+                              {isSelected && <UserCheck className="w-3.5 h-3.5 text-[#6A3102] shrink-0" />}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Online sessions list */}
+                  {presence && presence.onlineMembers.length > 0 && (
+                    <div className="pt-2 border-t border-[#EDE4DA] space-y-1">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-[#8C7A70] block">
+                        Ativos no momento:
+                      </span>
+                      <div className="flex flex-wrap gap-1.5">
+                        {presence.onlineMembers.map((om) => (
+                          <span
+                            key={om.clientId}
+                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-800 text-[11px] font-medium"
+                          >
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+                            {om.memberName}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             <button

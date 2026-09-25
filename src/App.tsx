@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import confetti from 'canvas-confetti';
 import { User } from 'firebase/auth';
-import { Task, UserSettings, TaskStatus, RiskLevel, WorkGroup, WorkGroupMember, SubTask, Deliverable } from './types';
+import { Task, UserSettings, TaskStatus, RiskLevel, WorkGroup, WorkGroupMember, SubTask, Deliverable, RepeatTaskOptions } from './types';
 import {
   loadTasks,
   saveTasks,
@@ -11,7 +11,7 @@ import {
   deduplicateTasks
 } from './utils/storage';
 import { getTodayISO, getDiffInDays } from './utils/dateUtils';
-import { calculateDeliverablesProgress } from './utils/deliverableUtils';
+import { calculateDeliverablesProgress, createRepeatedTask } from './utils/deliverableUtils';
 import { initAuth, googleSignIn, logout, getCurrentUser } from './services/firebaseAuth';
 import { syncTaskToGoogleCalendar, deleteTaskEventsFromGoogleCalendar } from './services/googleCalendar';
 import {
@@ -20,11 +20,21 @@ import {
   deleteWorkgroupFromFirestore,
   subscribeTasks,
   syncTaskToFirestore,
+  syncBatchTasksToFirestore,
   deleteTaskFromFirestore,
+  clearAllTasksFromServer,
   getActiveGroupId,
   setActiveGroupId,
   loadCachedWorkgroups,
-  testFirestoreConnection
+  saveCachedWorkgroups,
+  testFirestoreConnection,
+  getCurrentMemberName,
+  setCurrentMemberName,
+  subscribePresence,
+  subscribeRealtimeActivity,
+  forceRealtimeSyncNow,
+  PresenceInfo,
+  RealtimeActivityEvent
 } from './services/firestoreService';
 import { Navbar } from './components/Navbar';
 import { Dashboard } from './components/Dashboard';
@@ -36,6 +46,7 @@ import { ProductionAssistant } from './components/ProductionAssistant';
 import { TaskModal } from './components/TaskModal';
 import { TaskDetailModal } from './components/TaskDetailModal';
 import { RescheduleModal } from './components/RescheduleModal';
+import { RepeatTaskModal } from './components/RepeatTaskModal';
 import { SettingsModal } from './components/SettingsModal';
 import { GoogleCalendarModal } from './components/GoogleCalendarModal';
 import { GoogleCalendarConfirmModal } from './components/GoogleCalendarConfirmModal';
@@ -47,10 +58,18 @@ export default function App() {
     'dashboard' | 'today' | 'calendar' | 'approvals' | 'team' | 'assistant'
   >('dashboard');
 
-  // Workgroups state
+  // Workgroups & Real-time Presence state
   const [workgroups, setWorkgroups] = useState<WorkGroup[]>(() => loadCachedWorkgroups());
   const [activeGroupId, setActiveGroupIdState] = useState<string>(() => getActiveGroupId());
   const [dashboardMemberFilter, setDashboardMemberFilter] = useState<string>('all');
+  const [currentMemberName, setCurrentMemberNameState] = useState<string>(() => getCurrentMemberName());
+  const [presence, setPresence] = useState<PresenceInfo>({
+    onlineCount: 1,
+    onlineMembers: [],
+    isConnected: true,
+    lastSyncedAt: null
+  });
+  const [liveToast, setLiveToast] = useState<RealtimeActivityEvent | null>(null);
 
   // Google Calendar & Auth state
   const [googleUser, setGoogleUser] = useState<User | null>(null);
@@ -80,72 +99,78 @@ export default function App() {
   const [taskToEdit, setTaskToEdit] = useState<Task | null>(null);
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
   const [rescheduleTaskTarget, setRescheduleTaskTarget] = useState<Task | null>(null);
+  const [repeatTaskTarget, setRepeatTaskTarget] = useState<Task | null>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
-  // Real-time Firestore subscriptions for Workgroups and Tasks
+  // Real-time multi-user subscriptions (Workgroups, Tasks, Presence, Live Activity)
   useEffect(() => {
     testFirestoreConnection();
 
     const unsubGroups = subscribeWorkgroups((groups) => {
-      if (groups && groups.length > 0) {
+      if (Array.isArray(groups)) {
         setWorkgroups(groups);
       }
     });
 
-    const unsubTasks = subscribeTasks(activeGroupId, (serverTasks) => {
-      if (serverTasks && serverTasks.length > 0) {
-        setTasks((prev) => {
-          // If server has tasks, server is authoritative for the group
-          const serverMap = new Map<string, Task>();
-          for (const st of serverTasks) {
-            if (st && st.id) serverMap.set(st.id, st);
-          }
+    const unsubTasks = subscribeTasks((serverTasks) => {
+      if (Array.isArray(serverTasks)) {
+        const clean = deduplicateTasks(serverTasks);
+        setTasks(clean);
 
-          // Retain any brand-new locally created tasks that haven't reached server yet
-          for (const t of prev) {
-            if (t && t.id && !serverMap.has(t.id)) {
-              const ageMs = Date.now() - new Date(t.createdAt || 0).getTime();
-              if (ageMs < 20000) {
-                serverMap.set(t.id, t);
-                syncTaskToFirestore(t).catch(() => {});
-              }
-            }
-          }
-
-          const merged = deduplicateTasks(Array.from(serverMap.values()));
-          saveTasks(merged);
-          return merged;
-        });
-
-        // Instantly update open task modal if another user modified it in real-time
+        // Instantly update open task detail modal if another member modified or deleted it in real time
         setSelectedTask((current) => {
           if (!current) return null;
-          const fresh = serverTasks.find((t) => t.id === current.id);
-          return fresh || current;
+          const fresh = clean.find((t) => t.id === current.id);
+          return fresh || null;
         });
-      } else if (serverTasks && serverTasks.length === 0) {
-        // If Firestore tasks collection is empty, seed it with current local tasks so other users receive them
-        setTasks((prev) => {
-          if (prev && prev.length > 0) {
-            for (const t of prev) {
-              syncTaskToFirestore(t).catch(() => {});
-            }
-          }
-          return prev;
+
+        setRescheduleTaskTarget((current) => {
+          if (!current) return null;
+          const fresh = clean.find((t) => t.id === current.id);
+          return fresh || null;
         });
       }
+    });
+
+    const unsubPresence = subscribePresence((info) => {
+      setPresence(info);
+    });
+
+    const unsubActivity = subscribeRealtimeActivity((event) => {
+      setLiveToast(event);
+      addAuditLog('Sincronização Online', event.summary);
     });
 
     return () => {
       if (typeof unsubGroups === 'function') unsubGroups();
       if (typeof unsubTasks === 'function') unsubTasks();
+      if (typeof unsubPresence === 'function') unsubPresence();
+      if (typeof unsubActivity === 'function') unsubActivity();
     };
-  }, [activeGroupId]);
+  }, []);
 
-  // Keep localStorage tasks in sync
+  // Auto-hide live activity toast after 4.5s
   useEffect(() => {
-    saveTasks(tasks);
-  }, [tasks]);
+    if (!liveToast) return;
+    const timer = setTimeout(() => {
+      setLiveToast((prev) => (prev?.id === liveToast.id ? null : prev));
+    }, 4500);
+    return () => clearTimeout(timer);
+  }, [liveToast]);
+
+  // Keep activeGroupId valid if active group was deleted by another user
+  useEffect(() => {
+    if (workgroups.length > 0 && !workgroups.some((g) => g.id === activeGroupId)) {
+      const fallbackId = workgroups[0].id;
+      setActiveGroupIdState(fallbackId);
+      setActiveGroupId(fallbackId);
+    }
+  }, [workgroups, activeGroupId]);
+
+  const handleChangeMemberName = (name: string) => {
+    setCurrentMemberNameState(name);
+    setCurrentMemberName(name);
+  };
 
   // Initialize Firebase Auth listener
   useEffect(() => {
@@ -297,53 +322,173 @@ export default function App() {
 
   // Handler: Create WorkGroup
   const handleCreateGroup = async (name: string, description: string) => {
+    const now = new Date().toISOString();
     const newGroup: WorkGroup = {
       id: 'group-' + Date.now(),
       name,
       description,
       adminId: googleUser?.uid || 'user-admin',
-      createdAt: new Date().toISOString(),
+      createdAt: now,
+      updatedAt: now,
       members: [
         {
           id: 'member-' + Date.now(),
-          name: googleUser?.displayName || 'Administrador',
-          email: googleUser?.email || 'admin@equipe.com',
+          name: googleUser?.displayName || 'Bruno',
+          email: googleUser?.email || 'bruno.english06@gmail.com',
           role: 'admin',
           specialty: 'Gestão Criativa'
         }
       ]
     };
-    await saveWorkgroupToFirestore(newGroup);
     setWorkgroups((prev) => [...prev, newGroup]);
     setActiveGroupIdState(newGroup.id);
     setActiveGroupId(newGroup.id);
+    saveWorkgroupToFirestore(newGroup).catch(() => {});
     addAuditLog('Grupo de Trabalho', `Novo grupo "${name}" criado.`);
+  };
+
+  // Handler: Update WorkGroup (Name & Description)
+  const handleUpdateGroup = async (groupId: string, name: string, description: string) => {
+    setWorkgroups((prev) => {
+      const target = prev.find((g) => g.id === groupId);
+      if (!target) return prev;
+      const updatedGroup: WorkGroup = {
+        ...target,
+        name: name.trim() || target.name,
+        description: description.trim(),
+        updatedAt: new Date().toISOString()
+      };
+      saveWorkgroupToFirestore(updatedGroup).catch(() => {});
+      return prev.map((g) => (g.id === groupId ? updatedGroup : g));
+    });
+    addAuditLog('Grupo de Trabalho', `Grupo "${name}" atualizado.`);
+  };
+
+  // Handler: Delete WorkGroup
+  const handleDeleteGroup = async (groupId: string, deleteAssociatedTasks: boolean = false) => {
+    const targetGroup = workgroups.find((g) => g.id === groupId);
+    const remainingGroups = workgroups.filter((g) => g.id !== groupId);
+    const nextGroupId = remainingGroups[0]?.id || '';
+
+    setWorkgroups(remainingGroups);
+    if (activeGroupId === groupId) {
+      setActiveGroupIdState(nextGroupId);
+      setActiveGroupId(nextGroupId);
+    }
+
+    deleteWorkgroupFromFirestore(groupId, deleteAssociatedTasks, nextGroupId).catch(() => {});
+
+    if (deleteAssociatedTasks) {
+      setTasks((prev) => {
+        const remainingTasks = prev.filter((t) => t.groupId !== groupId);
+        saveTasks(remainingTasks);
+        return remainingTasks;
+      });
+    } else {
+      // Reassign tasks from the deleted group so no demands are lost
+      setTasks((prev) => {
+        let changed = false;
+        const updated = prev.map((t) => {
+          if (t.groupId === groupId) {
+            changed = true;
+            return {
+              ...t,
+              groupId: nextGroupId || undefined,
+              updatedAt: new Date().toISOString()
+            };
+          }
+          return t;
+        });
+        if (changed) saveTasks(updated);
+        return updated;
+      });
+    }
+
+    addAuditLog(
+      'Grupo de Trabalho',
+      `Grupo "${targetGroup?.name || groupId}" excluído.`
+    );
   };
 
   // Handler: Add Member to WorkGroup
   const handleAddMember = async (groupId: string, member: WorkGroupMember) => {
-    const targetGroup = workgroups.find((g) => g.id === groupId);
-    if (!targetGroup) return;
-    const updatedGroup: WorkGroup = {
-      ...targetGroup,
-      members: [...targetGroup.members, member]
-    };
-    await saveWorkgroupToFirestore(updatedGroup);
-    setWorkgroups((prev) => prev.map((g) => (g.id === groupId ? updatedGroup : g)));
+    setWorkgroups((prev) => {
+      const targetGroup = prev.find((g) => g.id === groupId) || prev[0];
+      if (!targetGroup) return prev;
+      // Avoid duplicate by exact name (case-insensitive)
+      const exists = targetGroup.members.some(
+        (m) => m.name.trim().toLowerCase() === member.name.trim().toLowerCase()
+      );
+      const updatedMembers = exists
+        ? targetGroup.members.map((m) =>
+            m.name.trim().toLowerCase() === member.name.trim().toLowerCase()
+              ? { ...m, ...member, id: m.id }
+              : m
+          )
+        : [...targetGroup.members, member];
+
+      const updatedGroup: WorkGroup = {
+        ...targetGroup,
+        updatedAt: new Date().toISOString(),
+        members: updatedMembers
+      };
+      saveWorkgroupToFirestore(updatedGroup).catch(() => {});
+      return prev.map((g) => (g.id === targetGroup.id ? updatedGroup : g));
+    });
     addAuditLog('Equipe', `Integrante "${member.name}" (${member.specialty}) adicionado ao grupo.`);
+  };
+
+  // Handler: Update Member in WorkGroup
+  const handleUpdateMember = async (groupId: string, updatedMember: WorkGroupMember) => {
+    setWorkgroups((prev) => {
+      const targetGroup = prev.find((g) => g.id === groupId) || prev[0];
+      if (!targetGroup) return prev;
+      const updatedGroup: WorkGroup = {
+        ...targetGroup,
+        updatedAt: new Date().toISOString(),
+        members: targetGroup.members.map((m) => (m.id === updatedMember.id ? updatedMember : m))
+      };
+      saveWorkgroupToFirestore(updatedGroup).catch(() => {});
+      return prev.map((g) => (g.id === targetGroup.id ? updatedGroup : g));
+    });
+    addAuditLog('Equipe', `Dados de "${updatedMember.name}" atualizados.`);
   };
 
   // Handler: Remove Member from WorkGroup
   const handleRemoveMember = async (groupId: string, memberId: string) => {
-    const targetGroup = workgroups.find((g) => g.id === groupId);
-    if (!targetGroup) return;
-    const updatedGroup: WorkGroup = {
-      ...targetGroup,
-      members: targetGroup.members.filter((m) => m.id !== memberId)
-    };
-    await saveWorkgroupToFirestore(updatedGroup);
-    setWorkgroups((prev) => prev.map((g) => (g.id === groupId ? updatedGroup : g)));
+    setWorkgroups((prev) => {
+      const targetGroup = prev.find((g) => g.id === groupId) || prev[0];
+      if (!targetGroup) return prev;
+      const updatedGroup: WorkGroup = {
+        ...targetGroup,
+        updatedAt: new Date().toISOString(),
+        members: targetGroup.members.filter((m) => m.id !== memberId)
+      };
+      saveWorkgroupToFirestore(updatedGroup).catch(() => {});
+      return prev.map((g) => (g.id === targetGroup.id ? updatedGroup : g));
+    });
     addAuditLog('Equipe', 'Integrante removido do grupo.');
+  };
+
+  // Handler: Update Task Team (Assignee & Collaborators)
+  const handleUpdateTaskTeam = (taskId: string, assignee: string, collaborators: string[]) => {
+    setTasks((prev) =>
+      prev.map((task) => {
+        if (task.id !== taskId) return task;
+        const updatedTask: Task = {
+          ...task,
+          assignee,
+          collaborators,
+          updatedAt: new Date().toISOString()
+        };
+        syncTaskToFirestore(updatedTask).catch(() => {});
+        if (selectedTask?.id === taskId) {
+          setSelectedTask(updatedTask);
+        }
+        return updatedTask;
+      })
+    );
+    addAuditLog('Equipe da Demanda', `Equipe da demanda atualizada (${[assignee, ...collaborators].filter(Boolean).join(', ')}).`, taskId);
   };
 
   // Handler: Filter in Dashboard by Member
@@ -380,13 +525,11 @@ export default function App() {
   const handleDeleteTask = (taskId: string) => {
     const cleanList = deduplicateTasks(tasks);
     const target = cleanList.find((t) => t.id === taskId);
-    if (confirm(`Deseja realmente excluir a demanda "${target?.title || ''}"?`)) {
-      const updated = deduplicateTasks(cleanList.filter((t) => t.id !== taskId));
-      setTasks(updated);
-      setSelectedTask(null);
-      deleteTaskFromFirestore(taskId).catch(() => {});
-      addAuditLog('Exclusão', `Demanda "${target?.title}" removida.`, taskId, target?.title);
-    }
+    const updated = deduplicateTasks(cleanList.filter((t) => t.id !== taskId));
+    setTasks(updated);
+    setSelectedTask(null);
+    deleteTaskFromFirestore(taskId, target?.title).catch(() => {});
+    addAuditLog('Exclusão', `Demanda "${target?.title}" removida.`, taskId, target?.title);
   };
 
   // Handler: Update status
@@ -529,9 +672,10 @@ export default function App() {
     setTasks((prev) =>
       prev.map((task) => {
         if (task.id !== taskId) return task;
+        const authorName = googleUser?.displayName || currentMemberName || 'Bruno';
         const newComment = {
           id: 'comment-' + Date.now(),
-          author: googleUser?.displayName || 'Bruno Designer',
+          author: authorName,
           content: commentText,
           createdAt: new Date().toISOString()
         };
@@ -540,7 +684,10 @@ export default function App() {
           comments: [...(task.comments || []), newComment],
           updatedAt: new Date().toISOString()
         };
-        syncTaskToFirestore(updated).catch(() => {});
+        syncTaskToFirestore(
+          updated,
+          `${authorName} comentou na demanda "${task.title}"`
+        ).catch(() => {});
         if (selectedTask?.id === taskId) {
           setSelectedTask(updated);
         }
@@ -564,14 +711,55 @@ export default function App() {
     }
   };
 
+  // Handler: Open Repeat Task Modal
+  const handleOpenRepeatTask = (task: Task) => {
+    setRepeatTaskTarget(task);
+  };
+
+  // Handler: Confirm Repeat Task
+  const handleConfirmRepeat = (sourceTask: Task, options: RepeatTaskOptions) => {
+    const newTask = createRepeatedTask(sourceTask, options, tasks, settings);
+    handleSaveTask(newTask);
+    addAuditLog(
+      'Repetição de Demanda',
+      `Demanda "${sourceTask.title}" repetida para novo ciclo (prazo: ${options.newDeadlineDate}).`,
+      newTask.id,
+      newTask.title
+    );
+    setRepeatTaskTarget(null);
+    setSelectedTask(newTask);
+  };
+
   // Handler: Reload data on reset
   const handleDataReset = () => {
-    setTasks(deduplicateTasks(loadTasks()));
+    const freshTasks = deduplicateTasks(loadTasks());
+    setTasks(freshTasks);
     setSettings(loadSettings());
+    if (freshTasks.length === 0) {
+      clearAllTasksFromServer().catch(() => {});
+    } else {
+      syncBatchTasksToFirestore(freshTasks).catch(() => {});
+    }
   };
 
   return (
     <div className="min-h-screen bg-[#FAF7F2] flex flex-col selection:bg-[#6A3102]/15 selection:text-[#6A3102]">
+      {/* Live Real-Time Multi-User Toast Notification */}
+      {liveToast && (
+        <div className="fixed bottom-5 right-5 z-50 max-w-sm bg-[#231815] text-white px-4 py-3 rounded-xl shadow-2xl border border-[#6A3102]/40 flex items-center gap-3 animate-in fade-in slide-in-from-bottom-4 duration-200">
+          <span className="relative flex h-2.5 w-2.5 shrink-0">
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+            <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
+          </span>
+          <div className="text-xs leading-snug">
+            <span className="font-bold text-emerald-400 block text-[10px] uppercase tracking-wider">
+              Atualização em Tempo Real
+            </span>
+            <span>{liveToast.summary}</span>
+          </div>
+        </div>
+      )}
+
       {/* Navigation Header */}
       <Navbar
         currentTab={currentTab}
@@ -588,6 +776,11 @@ export default function App() {
         todayTasksCount={todayTasksCount}
         activeGroupName={activeGroup?.name}
         teamMembersCount={activeGroup?.members.length}
+        teamMembers={activeGroup?.members || []}
+        currentMemberName={currentMemberName}
+        onChangeMemberName={handleChangeMemberName}
+        presence={presence}
+        onForceSync={forceRealtimeSyncNow}
       />
 
       {/* Main Content Area */}
@@ -597,12 +790,15 @@ export default function App() {
             tasks={tasks}
             settings={settings}
             overallRisk={overallRisk}
+            workgroups={workgroups}
+            activeGroupId={activeGroupId}
             onSelectTask={(task) => setSelectedTask(task)}
             onOpenNewTask={() => {
               setTaskToEdit(null);
               setIsTaskModalOpen(true);
             }}
             onOpenReschedule={(task) => setRescheduleTaskTarget(task)}
+            onRepeatTask={handleOpenRepeatTask}
             onUpdateStatus={handleUpdateStatus}
             onToggleStageCompleted={handleToggleStageCompleted}
             onUpdateTaskDeliverables={handleUpdateTaskDeliverables}
@@ -651,7 +847,10 @@ export default function App() {
             activeGroupId={activeGroupId}
             onSelectGroup={handleSelectGroup}
             onCreateGroup={handleCreateGroup}
+            onUpdateGroup={handleUpdateGroup}
+            onDeleteGroup={handleDeleteGroup}
             onAddMember={handleAddMember}
+            onUpdateMember={handleUpdateMember}
             onRemoveMember={handleRemoveMember}
             onSelectTask={(task) => setSelectedTask(task)}
             onFilterByMember={handleFilterByMember}
@@ -687,6 +886,9 @@ export default function App() {
         existingTasks={tasks}
         settings={settings}
         taskToEdit={taskToEdit}
+        workgroups={workgroups}
+        activeGroupId={activeGroupId}
+        onAddMember={handleAddMember}
       />
 
       {/* Task Details / Stage Timeline Modal */}
@@ -694,6 +896,8 @@ export default function App() {
         isOpen={!!selectedTask}
         onClose={() => setSelectedTask(null)}
         task={selectedTask}
+        workgroups={workgroups}
+        activeGroupId={activeGroupId}
         onToggleStageCompleted={handleToggleStageCompleted}
         onUpdateStatus={handleUpdateStatus}
         onOpenEdit={(task) => {
@@ -706,9 +910,12 @@ export default function App() {
           setRescheduleTaskTarget(task);
         }}
         onDeleteTask={handleDeleteTask}
+        onRepeatTask={handleOpenRepeatTask}
         onSyncGoogleCalendar={handleSyncSingleTaskToGoogle}
         onUpdateTaskDeliverables={handleUpdateTaskDeliverables}
         onUpdateTaskSubtasks={handleUpdateTaskSubtasks}
+        onUpdateTaskTeam={handleUpdateTaskTeam}
+        onAddMember={handleAddMember}
         onAddComment={handleAddComment}
         isGoogleConnected={!!googleToken}
         isSyncingCalendar={isSyncingCalendar}
@@ -722,6 +929,14 @@ export default function App() {
         existingTasks={tasks}
         settings={settings}
         onApplyReschedule={handleApplyReschedule}
+      />
+
+      {/* Repeat Task Modal */}
+      <RepeatTaskModal
+        isOpen={!!repeatTaskTarget}
+        onClose={() => setRepeatTaskTarget(null)}
+        task={repeatTaskTarget}
+        onConfirmRepeat={handleConfirmRepeat}
       />
 
       {/* Settings Modal */}
@@ -747,7 +962,11 @@ export default function App() {
         onSignIn={handleGoogleSignIn}
         onSignOut={handleGoogleSignOut}
         tasks={tasks}
-        onTasksUpdated={(updated) => setTasks(deduplicateTasks(updated))}
+        onTasksUpdated={(updated) => {
+          const clean = deduplicateTasks(updated);
+          setTasks(clean);
+          syncBatchTasksToFirestore(clean).catch(() => {});
+        }}
       />
 
       {/* Mandatory confirmation modal for workspace actions */}

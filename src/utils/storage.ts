@@ -3,14 +3,27 @@ import { DEFAULT_USER_SETTINGS } from './scheduler';
 import { DEMO_TASK_IDS } from '../data/initialTasks';
 
 const STORAGE_KEY_TASKS = 'oip_tasks_v1';
+const STORAGE_KEY_DELETED_TASKS = 'oip_deleted_tasks_v1';
 const STORAGE_KEY_SETTINGS = 'oip_settings_v1';
 const STORAGE_KEY_AUDIT = 'oip_audit_log_v1';
 
+export function getDeletedTaskIds(): Set<string> {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_DELETED_TASKS);
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw);
+    return new Set(Array.isArray(parsed) ? parsed : []);
+  } catch {
+    return new Set();
+  }
+}
+
 export function deduplicateTasks(tasks: Task[]): Task[] {
   if (!Array.isArray(tasks)) return [];
+  const deletedIds = getDeletedTaskIds();
   const map = new Map<string, Task>();
   for (const t of tasks) {
-    if (t && t.id) {
+    if (t && t.id && !deletedIds.has(t.id)) {
       map.set(t.id, t);
     }
   }

@@ -23,7 +23,8 @@ import {
   ChevronUp,
   ChevronDown,
   Package,
-  Wrench
+  Wrench,
+  RotateCw
 } from 'lucide-react';
 import {
   Task,
@@ -35,7 +36,9 @@ import {
   UserSettings,
   SubTask,
   WorkGroup,
-  Deliverable
+  WorkGroupMember,
+  Deliverable,
+  RecurrenceFrequency
 } from '../types';
 import { getTodayISO, addDays, formatHours, formatReadableDate } from '../utils/dateUtils';
 import { generateProductionPlan, PlanProposal } from '../utils/scheduler';
@@ -62,6 +65,9 @@ interface TaskModalProps {
   existingTasks: Task[];
   settings: UserSettings;
   taskToEdit?: Task | null;
+  workgroups?: WorkGroup[];
+  activeGroupId?: string;
+  onAddMember?: (groupId: string, member: WorkGroupMember) => Promise<void>;
 }
 
 export const TaskModal: React.FC<TaskModalProps> = ({
@@ -70,7 +76,10 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   onSaveTask,
   existingTasks,
   settings,
-  taskToEdit
+  taskToEdit,
+  workgroups: propWorkgroups,
+  activeGroupId: propActiveGroupId,
+  onAddMember
 }) => {
   const today = getTodayISO();
 
@@ -78,8 +87,9 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   const [formSection, setFormSection] = useState<'info' | 'deliverables' | 'planning' | 'team'>('info');
 
   // Workgroups & Categories
-  const [workgroups, setWorkgroups] = useState<WorkGroup[]>(() => loadCachedWorkgroups());
-  const activeGroupId = getActiveGroupId();
+  const [localWorkgroups, setLocalWorkgroups] = useState<WorkGroup[]>(() => loadCachedWorkgroups());
+  const workgroups = propWorkgroups !== undefined ? propWorkgroups : localWorkgroups;
+  const activeGroupId = propActiveGroupId || getActiveGroupId();
   const categories = getCategories();
   const specialties = getSpecialties();
 
@@ -135,11 +145,15 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   const [customSafetyMarginHours, setCustomSafetyMarginHours] = useState(
     taskToEdit?.customSafetyMarginHours || 24
   );
+  const [recurrence, setRecurrence] = useState<RecurrenceFrequency>(
+    taskToEdit?.recurrence || 'none'
+  );
 
   // 4. RESPONSABILIDADE & SUBTAREFAS
   const [assignee, setAssignee] = useState(taskToEdit?.assignee || 'Bruno');
   const [collaborators, setCollaborators] = useState<string[]>(taskToEdit?.collaborators || []);
   const [newCollabInput, setNewCollabInput] = useState('');
+  const [newCollabSpecialty, setNewCollabSpecialty] = useState('Designer de Feed');
   const [priority, setPriority] = useState<Priority>(taskToEdit?.priority || 'normal');
   const [status, setStatus] = useState<TaskStatus>(taskToEdit?.status || 'todo');
   const [subtasks, setSubtasks] = useState<SubTask[]>(taskToEdit?.subtasks || []);
@@ -166,7 +180,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   // Reset form whenever modal opens or taskToEdit changes
   useEffect(() => {
     if (isOpen) {
-      setWorkgroups(loadCachedWorkgroups());
+      setLocalWorkgroups(loadCachedWorkgroups());
       if (taskToEdit) {
         setTitle(taskToEdit.title || '');
         setClient(taskToEdit.client || '');
@@ -191,6 +205,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
         setSubtasks(taskToEdit.subtasks || []);
         setSafetyMargin(taskToEdit.safetyMargin || settings.defaultSafetyMargin);
         setCustomSafetyMarginHours(taskToEdit.customSafetyMarginHours || 24);
+        setRecurrence(taskToEdit.recurrence || 'none');
         setPlanProposal({
           stages: taskToEdit.stages,
           riskLevel: taskToEdit.riskLevel,
@@ -225,6 +240,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
         setSubtasks([]);
         setSafetyMargin(settings.defaultSafetyMargin);
         setCustomSafetyMarginHours(24);
+        setRecurrence('none');
         setPlanProposal(null);
       }
       setIsEditingDeliverable(false);
@@ -465,6 +481,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
       status,
       safetyMargin,
       customSafetyMarginHours: safetyMargin === 'custom' ? Number(customSafetyMarginHours) : undefined,
+      recurrence,
       deliverables,
       subtasks
     };
@@ -523,6 +540,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
       status,
       safetyMargin,
       customSafetyMarginHours: safetyMargin === 'custom' ? Number(customSafetyMarginHours) : undefined,
+      recurrence,
       stages: planProposal.stages,
       deliverables,
       subtasks,
@@ -1416,6 +1434,46 @@ export const TaskModal: React.FC<TaskModalProps> = ({
                     </select>
                   </div>
 
+                  {/* Recorrência / Repetição Programada */}
+                  <div className="p-3.5 rounded-xl border border-[#EDE4DA] bg-[#FAF7F2] space-y-2 text-xs">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <RotateCw className="w-4 h-4 text-[#6A3102]" />
+                        <label className="font-bold text-[#231815]">
+                          Recorrência da Demanda (Repetir Periódico)
+                        </label>
+                      </div>
+                      <span className={`text-[10px] px-2 py-0.5 rounded-full font-semibold ${
+                        recurrence !== 'none'
+                          ? 'bg-[#6A3102]/10 text-[#6A3102]'
+                          : 'bg-[#EDE4DA] text-[#73645B]'
+                      }`}>
+                        {recurrence === 'weekly'
+                          ? 'Toda Semana'
+                          : recurrence === 'biweekly'
+                          ? 'Quinzenal'
+                          : recurrence === 'monthly'
+                          ? 'Todo Mês'
+                          : 'Demanda Única'}
+                      </span>
+                    </div>
+
+                    <select
+                      value={recurrence}
+                      onChange={(e) => setRecurrence(e.target.value as RecurrenceFrequency)}
+                      className="w-full px-3 py-2 text-xs border border-[#EDE4DA] rounded-lg bg-white text-[#231815] font-medium"
+                    >
+                      <option value="none">Demanda Única (Sem repetição periódica)</option>
+                      <option value="weekly">Semanal (Repetir toda semana)</option>
+                      <option value="biweekly">Quinzenal (A cada 15 dias)</option>
+                      <option value="monthly">Mensal (Todo mês)</option>
+                    </select>
+
+                    <p className="text-[11px] text-[#73645B] leading-relaxed">
+                      Você pode repetir essa demanda a qualquer momento clicando em "Repetir Demanda", duplicando todos os entregáveis com o cronograma recalculado.
+                    </p>
+                  </div>
+
                   <div className="flex justify-between pt-2">
                     <button
                       type="button"
@@ -1499,6 +1557,173 @@ export const TaskModal: React.FC<TaskModalProps> = ({
                         <option value="in_review">Em Revisão</option>
                         <option value="awaiting_approval">Aguardando Aprovação</option>
                       </select>
+                    </div>
+                  </div>
+
+                  {/* Equipe / Colaboradores da Demanda */}
+                  <div className="p-4 rounded-xl border border-[#EDE4DA] bg-[#FAF7F2] space-y-3">
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                      <div>
+                        <span className="text-xs font-bold text-[#231815] block">
+                          Equipe Participante / Colaboradores ({collaborators.length})
+                        </span>
+                        <span className="text-[11px] text-[#73645B]">
+                          Selecione integrantes existentes ou acrescente uma nova pessoa à equipe e à demanda
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Quick select from current workgroup members */}
+                    {groupMembers.length > 0 && (
+                      <div className="space-y-1.5">
+                        <span className="text-[10px] font-bold text-[#8C7A70] uppercase tracking-wider block">
+                          Integrantes do Grupo ({currentGroup?.name}):
+                        </span>
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          {groupMembers.map((m) => {
+                            const isMain = assignee.trim().toLowerCase() === m.name.trim().toLowerCase();
+                            const isCollab = collaborators.some(
+                              (c) => c.trim().toLowerCase() === m.name.trim().toLowerCase()
+                            );
+                            return (
+                              <button
+                                key={m.id}
+                                type="button"
+                                onClick={() => {
+                                  if (isMain) return;
+                                  if (isCollab) {
+                                    setCollaborators(
+                                      collaborators.filter(
+                                        (c) => c.trim().toLowerCase() !== m.name.trim().toLowerCase()
+                                      )
+                                    );
+                                  } else {
+                                    setCollaborators([...collaborators, m.name]);
+                                  }
+                                }}
+                                className={`px-2.5 py-1 rounded-lg text-xs font-medium border flex items-center gap-1.5 transition-all cursor-pointer ${
+                                  isMain
+                                    ? 'bg-[#6A3102] text-white border-[#6A3102]'
+                                    : isCollab
+                                    ? 'bg-emerald-50 text-emerald-900 border-emerald-300 font-semibold'
+                                    : 'bg-white text-[#5C4D44] border-[#EDE4DA] hover:border-[#6A3102]/50'
+                                }`}
+                              >
+                                <User className="w-3 h-3" />
+                                <span>{m.name}</span>
+                                <span className="text-[10px] opacity-75">({m.specialty})</span>
+                                {(isMain || isCollab) && <Check className="w-3 h-3" />}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Selected collaborators chips */}
+                    {collaborators.length > 0 && (
+                      <div className="flex items-center gap-1.5 flex-wrap pt-1">
+                        <span className="text-[11px] font-semibold text-[#5C4D44]">Na equipe desta demanda:</span>
+                        {collaborators.map((collab) => (
+                          <span
+                            key={collab}
+                            className="px-2.5 py-1 rounded-full bg-white border border-[#EDE4DA] text-xs font-semibold text-[#231815] flex items-center gap-1.5"
+                          >
+                            <span>{collab}</span>
+                            <button
+                              type="button"
+                              onClick={() => setCollaborators(collaborators.filter((c) => c !== collab))}
+                              className="text-[#8C7A70] hover:text-red-600 cursor-pointer"
+                            >
+                              <X className="w-3 h-3" />
+                            </button>
+                          </span>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Add new member / collaborator input */}
+                    <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 pt-2 border-t border-[#EDE4DA]/80">
+                      <div className="sm:col-span-5">
+                        <input
+                          type="text"
+                          placeholder="Nome do integrante para acrescentar à equipe..."
+                          value={newCollabInput}
+                          onChange={(e) => setNewCollabInput(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              const trimmed = newCollabInput.trim();
+                              if (!trimmed) return;
+                              if (
+                                !collaborators.some((c) => c.toLowerCase() === trimmed.toLowerCase()) &&
+                                assignee.trim().toLowerCase() !== trimmed.toLowerCase()
+                              ) {
+                                setCollaborators([...collaborators, trimmed]);
+                              }
+                              const existsInGroup = groupMembers.some(
+                                (m) => m.name.trim().toLowerCase() === trimmed.toLowerCase()
+                              );
+                              if (!existsInGroup && onAddMember && currentGroup) {
+                                onAddMember(currentGroup.id, {
+                                  id: 'member-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
+                                  name: trimmed,
+                                  email: `${trimmed.toLowerCase().replace(/\s+/g, '.')}@equipe.com`,
+                                  role: 'member',
+                                  specialty: newCollabSpecialty || specialty || 'Designer de Feed'
+                                }).catch(() => {});
+                              }
+                              setNewCollabInput('');
+                            }
+                          }}
+                          className="w-full px-3 py-1.5 text-xs border border-[#EDE4DA] rounded-lg bg-white"
+                        />
+                      </div>
+                      <div className="sm:col-span-4">
+                        <select
+                          value={newCollabSpecialty}
+                          onChange={(e) => setNewCollabSpecialty(e.target.value)}
+                          className="w-full px-2.5 py-1.5 text-xs border border-[#EDE4DA] rounded-lg bg-white"
+                        >
+                          {specialties.map((s) => (
+                            <option key={s.id} value={s.name}>
+                              {s.name}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="sm:col-span-3">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const trimmed = newCollabInput.trim();
+                            if (!trimmed) return;
+                            if (
+                              !collaborators.some((c) => c.toLowerCase() === trimmed.toLowerCase()) &&
+                              assignee.trim().toLowerCase() !== trimmed.toLowerCase()
+                            ) {
+                              setCollaborators([...collaborators, trimmed]);
+                            }
+                            const existsInGroup = groupMembers.some(
+                              (m) => m.name.trim().toLowerCase() === trimmed.toLowerCase()
+                            );
+                            if (!existsInGroup && onAddMember && currentGroup) {
+                              onAddMember(currentGroup.id, {
+                                id: 'member-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
+                                name: trimmed,
+                                email: `${trimmed.toLowerCase().replace(/\s+/g, '.')}@equipe.com`,
+                                role: 'member',
+                                specialty: newCollabSpecialty || specialty || 'Designer de Feed'
+                              }).catch(() => {});
+                            }
+                            setNewCollabInput('');
+                          }}
+                          className="w-full px-3 py-1.5 text-xs bg-[#6A3102] hover:bg-[#542601] text-white rounded-lg font-semibold flex items-center justify-center gap-1 cursor-pointer"
+                        >
+                          <Plus className="w-3.5 h-3.5" />
+                          <span>Acrescentar Equipe</span>
+                        </button>
+                      </div>
                     </div>
                   </div>
 

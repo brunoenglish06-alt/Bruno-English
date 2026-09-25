@@ -25,7 +25,8 @@ import {
   Sparkles,
   Package,
   Wrench,
-  AlertCircle
+  AlertCircle,
+  RotateCw
 } from 'lucide-react';
 import {
   Task,
@@ -35,7 +36,9 @@ import {
   TaskComment,
   TaskFile,
   Deliverable,
-  Priority
+  Priority,
+  WorkGroup,
+  WorkGroupMember
 } from '../types';
 import { formatHours, formatReadableDate, getTodayISO, getUrgencyBadge } from '../utils/dateUtils';
 import {
@@ -52,14 +55,19 @@ interface TaskDetailModalProps {
   isOpen: boolean;
   onClose: () => void;
   task: Task | null;
+  workgroups?: WorkGroup[];
+  activeGroupId?: string;
   onToggleStageCompleted: (taskId: string, stageId: string) => void;
   onUpdateStatus: (taskId: string, newStatus: TaskStatus) => void;
   onOpenEdit: (task: Task) => void;
   onOpenReschedule: (task: Task) => void;
   onDeleteTask: (taskId: string) => void;
+  onRepeatTask?: (task: Task) => void;
   onSyncGoogleCalendar?: (task: Task) => Promise<void>;
   onUpdateTaskDeliverables?: (taskId: string, deliverables: Deliverable[]) => void;
   onUpdateTaskSubtasks?: (taskId: string, subtasks: SubTask[]) => void;
+  onUpdateTaskTeam?: (taskId: string, assignee: string, collaborators: string[]) => void;
+  onAddMember?: (groupId: string, member: WorkGroupMember) => Promise<void>;
   onAddComment?: (taskId: string, commentText: string) => void;
   isGoogleConnected?: boolean;
   isSyncingCalendar?: boolean;
@@ -69,14 +77,19 @@ export const TaskDetailModal: React.FC<TaskDetailModalProps> = ({
   isOpen,
   onClose,
   task,
+  workgroups = [],
+  activeGroupId,
   onToggleStageCompleted,
   onUpdateStatus,
   onOpenEdit,
   onOpenReschedule,
   onDeleteTask,
+  onRepeatTask,
   onSyncGoogleCalendar,
   onUpdateTaskDeliverables,
   onUpdateTaskSubtasks,
+  onUpdateTaskTeam,
+  onAddMember,
   onAddComment,
   isGoogleConnected = false,
   isSyncingCalendar = false
@@ -115,7 +128,16 @@ export const TaskDetailModal: React.FC<TaskDetailModalProps> = ({
   // Expanded stages toggle
   const [stagesExpanded, setStagesExpanded] = useState(false);
 
+  // Inline team editor state
+  const [isEditingTeam, setIsEditingTeam] = useState(false);
+  const [newTeamMemberName, setNewTeamMemberName] = useState('');
+  const [newTeamMemberSpecialty, setNewTeamMemberSpecialty] = useState('Designer de Feed');
+
   if (!isOpen || !task) return null;
+
+  const currentGroup =
+    workgroups.find((g) => g.id === (task.groupId || activeGroupId)) || workgroups[0];
+  const groupMembers = currentGroup?.members || [];
 
   const statusCfg = TASK_STATUS_CONFIG[task.status];
   const priorityCfg = PRIORITY_CONFIG[task.priority];
@@ -347,6 +369,17 @@ export const TaskDetailModal: React.FC<TaskDetailModalProps> = ({
                 </button>
               )}
 
+              {onRepeatTask && (
+                <button
+                  onClick={() => onRepeatTask(task)}
+                  title="Repetir demanda (novo ciclo)"
+                  className="px-2.5 py-1.5 rounded-lg text-xs font-semibold border border-[#EDE4DA] bg-white text-[#6A3102] hover:bg-[#FAF7F2] flex items-center gap-1.5 transition-all cursor-pointer shadow-2xs"
+                >
+                  <RotateCw className="w-3.5 h-3.5 text-[#6A3102]" />
+                  <span className="hidden sm:inline">Repetir</span>
+                </button>
+              )}
+
               <button
                 onClick={() => onOpenEdit(task)}
                 title="Editar demanda completa"
@@ -522,6 +555,53 @@ export const TaskDetailModal: React.FC<TaskDetailModalProps> = ({
                 </div>
               )}
 
+              {/* Recorrência & Repetir Demanda Widget */}
+              <div className="p-4 rounded-xl border border-[#EDE4DA] bg-[#FAF7F2] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <div className="w-9 h-9 rounded-lg bg-[#6A3102]/10 text-[#6A3102] flex items-center justify-center shrink-0">
+                    <RotateCw className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-xs font-bold text-[#231815]">
+                        Repetição da Demanda
+                      </span>
+                      <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${
+                        task.recurrence && task.recurrence !== 'none'
+                          ? 'bg-[#6A3102]/10 text-[#6A3102] font-semibold'
+                          : 'bg-[#EDE4DA] text-[#73645B]'
+                      }`}>
+                        {task.recurrence === 'weekly'
+                          ? '🔄 Recorrente: Semanal'
+                          : task.recurrence === 'biweekly'
+                          ? '🔄 Recorrente: Quinzenal'
+                          : task.recurrence === 'monthly'
+                          ? '🔄 Recorrente: Mensal'
+                          : 'Demanda Única'}
+                      </span>
+                      {task.repeatedFromTaskId && (
+                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200 font-medium">
+                          Novo Ciclo Replicado
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-[11px] text-[#73645B] mt-0.5">
+                      Repita essa demanda para um novo período mantendo todos os entregáveis e recalculando automaticamente o cronograma sem sobreposições.
+                    </p>
+                  </div>
+                </div>
+
+                {onRepeatTask && (
+                  <button
+                    onClick={() => onRepeatTask(task)}
+                    className="px-3.5 py-2 text-xs font-semibold rounded-lg bg-[#6A3102] hover:bg-[#542601] text-white shadow-2xs flex items-center gap-1.5 shrink-0 transition-colors cursor-pointer self-start sm:self-auto"
+                  >
+                    <RotateCw className="w-3.5 h-3.5" />
+                    <span>Repetir Demanda Agora</span>
+                  </button>
+                )}
+              </div>
+
               {/* Progress Overview Card for Stages */}
               <div className="p-4 rounded-xl bg-[#FAF7F2] border border-[#EDE4DA]">
                 <div className="flex items-center justify-between text-xs mb-2">
@@ -557,7 +637,18 @@ export const TaskDetailModal: React.FC<TaskDetailModalProps> = ({
                 </div>
 
                 <div className="p-3 rounded-xl border border-[#EDE4DA] bg-white">
-                  <span className="text-[11px] text-[#8C7A70] block font-medium">Equipe</span>
+                  <div className="flex items-center justify-between gap-1">
+                    <span className="text-[11px] text-[#8C7A70] block font-medium">Equipe</span>
+                    {onUpdateTaskTeam && (
+                      <button
+                        type="button"
+                        onClick={() => setIsEditingTeam(!isEditingTeam)}
+                        className="text-[10px] font-semibold text-[#6A3102] hover:underline cursor-pointer"
+                      >
+                        {isEditingTeam ? 'Fechar' : '+ Acrescentar'}
+                      </button>
+                    )}
+                  </div>
                   <strong className="text-xs text-[#231815] block mt-1 truncate">
                     {allAssignees.join(', ')}
                   </strong>
@@ -570,6 +661,126 @@ export const TaskDetailModal: React.FC<TaskDetailModalProps> = ({
                   </strong>
                 </div>
               </div>
+
+              {/* Inline Team Management Panel */}
+              {isEditingTeam && onUpdateTaskTeam && (
+                <div className="p-4 rounded-xl border border-[#6A3102]/30 bg-[#FAF7F2] space-y-3 animate-in fade-in duration-100">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <span className="text-xs font-bold text-[#231815] block">
+                        Gerenciar Equipe da Demanda
+                      </span>
+                      <span className="text-[11px] text-[#73645B]">
+                        Clique nos integrantes do grupo ou adicione uma nova pessoa à equipe
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setIsEditingTeam(false)}
+                      className="text-[#8C7A70] hover:text-[#231815] p-1 cursor-pointer"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+
+                  {groupMembers.length > 0 && (
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      {groupMembers.map((m) => {
+                        const isMain = task.assignee.trim().toLowerCase() === m.name.trim().toLowerCase();
+                        const currentCollabs = task.collaborators || [];
+                        const isCollab = currentCollabs.some(
+                          (c) => c.trim().toLowerCase() === m.name.trim().toLowerCase()
+                        );
+                        return (
+                          <button
+                            key={m.id}
+                            type="button"
+                            onClick={() => {
+                              if (isMain) return;
+                              const nextCollabs = isCollab
+                                ? currentCollabs.filter(
+                                    (c) => c.trim().toLowerCase() !== m.name.trim().toLowerCase()
+                                  )
+                                : [...currentCollabs, m.name];
+                              onUpdateTaskTeam(task.id, task.assignee, nextCollabs);
+                            }}
+                            className={`px-2.5 py-1 rounded-lg text-xs font-medium border flex items-center gap-1.5 transition-all cursor-pointer ${
+                              isMain
+                                ? 'bg-[#6A3102] text-white border-[#6A3102]'
+                                : isCollab
+                                ? 'bg-emerald-50 text-emerald-900 border-emerald-300 font-semibold'
+                                : 'bg-white text-[#5C4D44] border-[#EDE4DA] hover:border-[#6A3102]/50'
+                            }`}
+                          >
+                            <User className="w-3 h-3" />
+                            <span>{m.name}</span>
+                            <span className="text-[10px] opacity-75">({m.specialty})</span>
+                            {(isMain || isCollab) && <Check className="w-3 h-3" />}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 pt-2 border-t border-[#EDE4DA]">
+                    <div className="sm:col-span-5">
+                      <input
+                        type="text"
+                        placeholder="Nome do novo integrante..."
+                        value={newTeamMemberName}
+                        onChange={(e) => setNewTeamMemberName(e.target.value)}
+                        className="w-full px-3 py-1.5 text-xs border border-[#EDE4DA] rounded-lg bg-white"
+                      />
+                    </div>
+                    <div className="sm:col-span-4">
+                      <select
+                        value={newTeamMemberSpecialty}
+                        onChange={(e) => setNewTeamMemberSpecialty(e.target.value)}
+                        className="w-full px-2.5 py-1.5 text-xs border border-[#EDE4DA] rounded-lg bg-white"
+                      >
+                        {specialties.map((s) => (
+                          <option key={s.id} value={s.name}>
+                            {s.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="sm:col-span-3">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const trimmed = newTeamMemberName.trim();
+                          if (!trimmed) return;
+                          const currentCollabs = task.collaborators || [];
+                          if (
+                            !currentCollabs.some((c) => c.toLowerCase() === trimmed.toLowerCase()) &&
+                            task.assignee.trim().toLowerCase() !== trimmed.toLowerCase()
+                          ) {
+                            onUpdateTaskTeam(task.id, task.assignee, [...currentCollabs, trimmed]);
+                          }
+                          const existsInGroup = groupMembers.some(
+                            (m) => m.name.trim().toLowerCase() === trimmed.toLowerCase()
+                          );
+                          if (!existsInGroup && onAddMember && currentGroup) {
+                            onAddMember(currentGroup.id, {
+                              id: 'member-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
+                              name: trimmed,
+                              email: `${trimmed.toLowerCase().replace(/\s+/g, '.')}@equipe.com`,
+                              role: 'member',
+                              specialty: newTeamMemberSpecialty
+                            }).catch(() => {});
+                          }
+                          setNewTeamMemberName('');
+                        }}
+                        className="w-full px-3 py-1.5 text-xs bg-[#6A3102] hover:bg-[#542601] text-white rounded-lg font-semibold flex items-center justify-center gap-1 cursor-pointer"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        <span>Acrescentar</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
 
               {/* Briefing preview */}
               <div className="p-4 rounded-xl border border-[#EDE4DA] bg-[#FAF7F2]/40">

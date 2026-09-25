@@ -107,6 +107,17 @@ export interface TaskHistoryEntry {
   details?: string;
 }
 
+export type RecurrenceFrequency = 'none' | 'weekly' | 'biweekly' | 'monthly';
+
+export interface RepeatTaskOptions {
+  newTitle?: string;
+  newDeadlineDate: string;
+  newDeadlineTime?: string;
+  newStartDate?: string;
+  recurrence?: RecurrenceFrequency;
+  resetDeliverablesStatus?: boolean;
+}
+
 export interface Task {
   id: string;
   title: string;
@@ -139,6 +150,8 @@ export interface Task {
   history?: TaskHistoryEntry[];
   riskLevel: RiskLevel;
   riskExplanation?: string;
+  recurrence?: RecurrenceFrequency;
+  repeatedFromTaskId?: string;
   createdAt: string;
   updatedAt: string;
   deliveredAt?: string;
@@ -162,6 +175,7 @@ export interface WorkGroup {
   description?: string;
   adminId: string;
   createdAt: string;
+  updatedAt?: string;
   members: WorkGroupMember[];
 }
 

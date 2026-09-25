@@ -1,4 +1,6 @@
-import { Deliverable, Task, TaskStatus } from '../types';
+import { Deliverable, Task, TaskStatus, RepeatTaskOptions, UserSettings } from '../types';
+import { generateProductionPlan } from './scheduler';
+import { getTodayISO, addDays, getDiffInDays } from './dateUtils';
 
 export interface DeliverablesSummary {
   total: number;
@@ -249,3 +251,110 @@ export const DELIVERABLE_PRESETS: DeliverablePreset[] = [
     ]
   }
 ];
+
+/**
+ * Creates a duplicate/repeat instance of an existing task for a new deadline cycle,
+ * recalculating intelligent production stages and resetting deliverables.
+ */
+export function createRepeatedTask(
+  sourceTask: Task,
+  options: RepeatTaskOptions,
+  existingTasks: Task[],
+  settings: UserSettings
+): Task {
+  const newTaskId = `task-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+  const today = getTodayISO();
+  const newDeadlineDate = options.newDeadlineDate;
+  const newDeadlineTime = options.newDeadlineTime || sourceTask.deadlineTime || '18:00';
+  const newStartDate = options.newStartDate || today;
+
+  // Clone deliverables and reset them for the new cycle
+  let newDeliverables: Deliverable[] | undefined = undefined;
+  if (sourceTask.deliverables && sourceTask.deliverables.length > 0) {
+    newDeliverables = sourceTask.deliverables.map((d, index) => {
+      const newDelivId = `deliv-${Date.now()}-${index}`;
+      let newDelivDeadline = newDeadlineDate;
+      // Maintain relative deadline offset if deliverable was due earlier than main task
+      if (d.deadlineDate && d.deadlineDate !== sourceTask.deadlineDate) {
+        const offset = getDiffInDays(d.deadlineDate, sourceTask.deadlineDate);
+        newDelivDeadline = addDays(newDeadlineDate, -offset);
+        if (newDelivDeadline < today) newDelivDeadline = today;
+      }
+
+      return {
+        ...d,
+        id: newDelivId,
+        taskId: newTaskId,
+        status: options.resetDeliverablesStatus !== false ? ('todo' as TaskStatus) : d.status,
+        completed: options.resetDeliverablesStatus !== false ? false : d.completed,
+        deadlineDate: newDelivDeadline,
+        deadlineTime: d.deadlineTime || newDeadlineTime
+      };
+    });
+  }
+
+  // Clone subtasks and reset completion
+  let newSubtasks = undefined;
+  if (sourceTask.subtasks && sourceTask.subtasks.length > 0) {
+    newSubtasks = sourceTask.subtasks.map((s, idx) => ({
+      ...s,
+      id: `sub-${Date.now()}-${idx}`,
+      completed: false
+    }));
+  }
+
+  // Adjust approval deadline if needed
+  let newApprovalDeadlineDate = undefined;
+  if (sourceTask.requiresApproval) {
+    if (sourceTask.approvalDeadlineDate) {
+      const approvalOffset = getDiffInDays(sourceTask.approvalDeadlineDate, sourceTask.deadlineDate);
+      newApprovalDeadlineDate = addDays(newDeadlineDate, -Math.max(1, approvalOffset));
+      if (newApprovalDeadlineDate < today) newApprovalDeadlineDate = today;
+    } else {
+      newApprovalDeadlineDate = addDays(newDeadlineDate, -1);
+      if (newApprovalDeadlineDate < today) newApprovalDeadlineDate = today;
+    }
+  }
+
+  const draft: Partial<Task> = {
+    id: newTaskId,
+    title: options.newTitle?.trim() || `${sourceTask.title} (Novo Ciclo)`,
+    client: sourceTask.client,
+    project: sourceTask.project,
+    groupId: sourceTask.groupId,
+    type: sourceTask.type,
+    category: sourceTask.category,
+    specialty: sourceTask.specialty,
+    collaborators: sourceTask.collaborators ? [...sourceTask.collaborators] : [],
+    description: sourceTask.description,
+    startDate: newStartDate,
+    deadlineDate: newDeadlineDate,
+    deadlineTime: newDeadlineTime,
+    requiresApproval: sourceTask.requiresApproval,
+    approvalDeadlineDate: newApprovalDeadlineDate,
+    approvalDeadlineTime: sourceTask.approvalDeadlineTime || '12:00',
+    estimatedProductionHours: sourceTask.estimatedProductionHours,
+    estimatedAdjustmentHours: sourceTask.estimatedAdjustmentHours,
+    priority: sourceTask.priority,
+    assignee: sourceTask.assignee,
+    status: 'todo',
+    safetyMargin: sourceTask.safetyMargin,
+    customSafetyMarginHours: sourceTask.customSafetyMarginHours,
+    recurrence: options.recurrence || sourceTask.recurrence || 'none',
+    repeatedFromTaskId: sourceTask.id,
+    deliverables: newDeliverables,
+    subtasks: newSubtasks,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    stages: []
+  };
+
+  // Generate intelligent production plan for the new deadline
+  const plan = generateProductionPlan(draft, existingTasks, settings);
+  draft.stages = plan.stages;
+  draft.riskLevel = plan.riskLevel;
+  draft.riskExplanation = plan.riskExplanation;
+
+  return draft as Task;
+}
+

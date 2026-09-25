@@ -23,7 +23,8 @@ import {
   CheckSquare,
   AlertCircle,
   Package,
-  Layers
+  Layers,
+  RotateCw
 } from 'lucide-react';
 import { Task, TaskStatus, Priority, RiskLevel, UserSettings, WorkGroup, Deliverable } from '../types';
 import {
@@ -46,9 +47,12 @@ interface DashboardProps {
   tasks: Task[];
   settings: UserSettings;
   overallRisk: RiskLevel;
+  workgroups?: WorkGroup[];
+  activeGroupId?: string;
   onSelectTask: (task: Task) => void;
   onOpenNewTask: () => void;
   onOpenReschedule: (task: Task) => void;
+  onRepeatTask?: (task: Task) => void;
   onUpdateStatus: (taskId: string, newStatus: TaskStatus) => void;
   onToggleStageCompleted: (taskId: string, stageId: string) => void;
   onUpdateTaskDeliverables?: (taskId: string, deliverables: Deliverable[]) => void;
@@ -62,9 +66,12 @@ export const Dashboard: React.FC<DashboardProps> = ({
   tasks,
   settings,
   overallRisk,
+  workgroups: propWorkgroups,
+  activeGroupId: propActiveGroupId,
   onSelectTask,
   onOpenNewTask,
   onOpenReschedule,
+  onRepeatTask,
   onUpdateStatus,
   onToggleStageCompleted,
   onUpdateTaskDeliverables,
@@ -74,8 +81,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
   initialMemberFilter = 'all'
 }) => {
   const today = getTodayISO();
-  const workgroups = loadCachedWorkgroups();
-  const activeGroupId = getActiveGroupId();
+  const workgroups = propWorkgroups !== undefined ? propWorkgroups : loadCachedWorkgroups();
+  const activeGroupId = propActiveGroupId || getActiveGroupId();
   const activeGroup = workgroups.find((g) => g.id === activeGroupId) || workgroups[0];
 
   // Search and filter states
@@ -719,7 +726,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                           {task.title}
                         </h3>
 
-                        {/* Specialty & Equipe */}
+                        {/* Specialty & Equipe & Recurrence */}
                         <div className="flex items-center gap-2 mt-2 flex-wrap">
                           <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-[#EDE4DA] text-[#4A3B32]">
                             {task.specialty || task.type}
@@ -728,6 +735,23 @@ export const Dashboard: React.FC<DashboardProps> = ({
                             <Users className="w-3 h-3 text-[#8C7A70]" />
                             <span className="truncate">{allAssignees.join(', ')}</span>
                           </div>
+                          {task.recurrence && task.recurrence !== 'none' && (
+                            <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-[#6A3102]/10 text-[#6A3102] flex items-center gap-1 border border-[#6A3102]/20">
+                              <RotateCw className="w-2.5 h-2.5" />
+                              <span>
+                                {task.recurrence === 'weekly'
+                                  ? 'Semanal'
+                                  : task.recurrence === 'biweekly'
+                                  ? 'Quinzenal'
+                                  : 'Mensal'}
+                              </span>
+                            </span>
+                          )}
+                          {task.repeatedFromTaskId && (
+                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200 font-medium">
+                              Ciclo Replicado
+                            </span>
+                          )}
                         </div>
 
                         {/* Entregáveis Chips (Requested in prompt: [Carrossel] [Story] [Reels]) */}
@@ -833,19 +857,32 @@ export const Dashboard: React.FC<DashboardProps> = ({
                       </div>
 
                       {/* Actions Row */}
-                      <div className="pt-2 border-t border-[#EDE4DA] flex items-center justify-between gap-2 text-xs">
-                        <button
-                          onClick={() => onOpenReschedule(task)}
-                          title="Replanejar cronograma"
-                          className="text-[#73645B] hover:text-[#6A3102] flex items-center gap-1 transition-colors cursor-pointer"
-                        >
-                          <RefreshCw className="w-3.5 h-3.5" />
-                          <span>Replanejar</span>
-                        </button>
+                      <div className="pt-2 border-t border-[#EDE4DA] flex items-center justify-between gap-1.5 text-xs">
+                        <div className="flex items-center gap-2.5">
+                          <button
+                            onClick={() => onOpenReschedule(task)}
+                            title="Replanejar cronograma"
+                            className="text-[#73645B] hover:text-[#6A3102] flex items-center gap-1 transition-colors cursor-pointer"
+                          >
+                            <RefreshCw className="w-3.5 h-3.5" />
+                            <span className="hidden sm:inline">Replanejar</span>
+                          </button>
+
+                          {onRepeatTask && (
+                            <button
+                              onClick={() => onRepeatTask(task)}
+                              title="Repetir demanda (novo ciclo com cronograma inteligente)"
+                              className="text-[#73645B] hover:text-[#6A3102] flex items-center gap-1 transition-colors cursor-pointer font-medium"
+                            >
+                              <RotateCw className="w-3.5 h-3.5 text-[#6A3102]" />
+                              <span>Repetir</span>
+                            </button>
+                          )}
+                        </div>
 
                         <button
                           onClick={() => onSelectTask(task)}
-                          className="px-3 py-1.5 text-xs font-semibold text-[#6A3102] hover:bg-[#FAF7F2] rounded-lg border border-[#EDE4DA] flex items-center gap-1.5 cursor-pointer shadow-2xs"
+                          className="px-2.5 py-1.5 text-xs font-semibold text-[#6A3102] hover:bg-[#FAF7F2] rounded-lg border border-[#EDE4DA] flex items-center gap-1.5 cursor-pointer shadow-2xs"
                         >
                           <Eye className="w-3.5 h-3.5" />
                           <span>Ver Demanda</span>
