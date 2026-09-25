@@ -33,6 +33,8 @@ import {
   subscribePresence,
   subscribeRealtimeActivity,
   forceRealtimeSyncNow,
+  isUserAuthorizedForGroup,
+  getUserRoleInGroup,
   PresenceInfo,
   RealtimeActivityEvent
 } from './services/firestoreService';
@@ -67,9 +69,12 @@ export default function App() {
     onlineCount: 1,
     onlineMembers: [],
     isConnected: true,
+    syncStatus: 'syncing',
+    syncErrorMessage: null,
     lastSyncedAt: null
   });
   const [liveToast, setLiveToast] = useState<RealtimeActivityEvent | null>(null);
+  const [conflictNotice, setConflictNotice] = useState<string | null>(null);
 
   // Google Calendar & Auth state
   const [googleUser, setGoogleUser] = useState<User | null>(null);
@@ -309,10 +314,38 @@ export default function App() {
     ).length;
   }, [tasks]);
 
-  // Active group
+  // Active group & Authorization (Requirement 6)
   const activeGroup = useMemo(() => {
     return workgroups.find((g) => g.id === activeGroupId) || workgroups[0];
   }, [workgroups, activeGroupId]);
+
+  const isAuthorizedInActiveGroup = useMemo(() => {
+    if (!activeGroup) return true;
+    return isUserAuthorizedForGroup(
+      activeGroup,
+      googleUser?.email,
+      currentMemberName,
+      googleUser?.uid
+    );
+  }, [activeGroup, googleUser, currentMemberName]);
+
+  const currentUserRole = useMemo(() => {
+    return getUserRoleInGroup(
+      activeGroup,
+      googleUser?.email,
+      currentMemberName,
+      googleUser?.uid
+    );
+  }, [activeGroup, googleUser, currentMemberName]);
+
+  // Scoped tasks for the active group (only accessible if user is authorized in the group)
+  const visibleGroupTasks = useMemo(() => {
+    if (!isAuthorizedInActiveGroup) return [];
+    if (!activeGroup) return tasks;
+    return tasks.filter(
+      (t) => !t.groupId || t.groupId === activeGroup.id
+    );
+  }, [tasks, activeGroup, isAuthorizedInActiveGroup]);
 
   // Handler: Change active group
   const handleSelectGroup = (groupId: string) => {
@@ -497,27 +530,65 @@ export default function App() {
     setCurrentTab('dashboard');
   };
 
-  // Handler: Save or Update Task
+  // Handler: Save or Update Task (with Concurrent Edit Conflict Detection & Merge - Requirement 7)
   const handleSaveTask = (newTask: Task) => {
+    if (!isAuthorizedInActiveGroup) return;
     const cleanList = deduplicateTasks(tasks);
     const existingIndex = cleanList.findIndex((t) => t.id === newTask.id);
+    let finalTaskToSave: Task = {
+      ...newTask,
+      groupId: newTask.groupId || activeGroup?.id
+    };
     let updated: Task[];
 
     if (existingIndex >= 0) {
+      const currentInState = cleanList[existingIndex];
+      // Check if another user updated this task while the modal was open
+      if (
+        currentInState.updatedBy &&
+        currentInState.updatedBy !== currentMemberName &&
+        currentInState.updatedAt > (taskToEdit?.updatedAt || '')
+      ) {
+        // Merge comments and subtasks added by the other user so nothing is overwritten silently
+        const mergedCommentsMap = new Map<string, any>();
+        for (const c of currentInState.comments || []) mergedCommentsMap.set(c.id, c);
+        for (const c of newTask.comments || []) mergedCommentsMap.set(c.id, c);
+
+        const mergedSubtasksMap = new Map<string, SubTask>();
+        for (const s of currentInState.subtasks || []) mergedSubtasksMap.set(s.id, s);
+        for (const s of newTask.subtasks || []) mergedSubtasksMap.set(s.id, s);
+
+        finalTaskToSave = {
+          ...finalTaskToSave,
+          comments: Array.from(mergedCommentsMap.values()),
+          subtasks: Array.from(mergedSubtasksMap.values()),
+          history: currentInState.history || []
+        };
+        setConflictNotice(
+          `Conflito de edição prevenido: ${currentInState.updatedBy} também alterou "${newTask.title}" recentemente. Comentários, subtarefas e histórico foram mesclados sem perda de dados.`
+        );
+        setTimeout(() => setConflictNotice(null), 7000);
+      }
+
       updated = [...cleanList];
-      updated[existingIndex] = newTask;
-      addAuditLog('Edição', `Demanda "${newTask.title}" atualizada.`, newTask.id, newTask.title);
+      updated[existingIndex] = finalTaskToSave;
+      addAuditLog('Edição', `Demanda "${finalTaskToSave.title}" atualizada.`, finalTaskToSave.id, finalTaskToSave.title);
     } else {
-      updated = [newTask, ...cleanList];
-      addAuditLog('Criação', `Nova demanda "${newTask.title}" planejada.`, newTask.id, newTask.title);
+      updated = [finalTaskToSave, ...cleanList];
+      addAuditLog('Criação', `Nova demanda "${finalTaskToSave.title}" planejada.`, finalTaskToSave.id, finalTaskToSave.title);
     }
 
     const uniqueUpdated = deduplicateTasks(updated);
     setTasks(uniqueUpdated);
-    syncTaskToFirestore(newTask).catch(() => {});
+    syncTaskToFirestore(
+      finalTaskToSave,
+      existingIndex >= 0
+        ? `${currentMemberName} editou a demanda "${finalTaskToSave.title}"`
+        : `${currentMemberName} criou a demanda "${finalTaskToSave.title}"`
+    ).catch(() => {});
 
-    if (selectedTask?.id === newTask.id) {
-      setSelectedTask(newTask);
+    if (selectedTask?.id === finalTaskToSave.id) {
+      setSelectedTask(finalTaskToSave);
     }
   };
 
@@ -785,9 +856,48 @@ export default function App() {
 
       {/* Main Content Area */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
+        {conflictNotice && (
+          <div className="mb-4 p-3.5 rounded-xl bg-amber-50 border border-amber-300 text-amber-900 text-xs font-medium flex items-center justify-between shadow-xs">
+            <span>{conflictNotice}</span>
+            <button
+              type="button"
+              onClick={() => setConflictNotice(null)}
+              className="ml-3 text-amber-800 font-bold hover:underline cursor-pointer"
+            >
+              Fechar
+            </button>
+          </div>
+        )}
+
+        {!isAuthorizedInActiveGroup && activeGroup ? (
+          <div className="my-12 max-w-lg mx-auto bg-white rounded-2xl border border-red-200 shadow-lg p-8 text-center space-y-4">
+            <div className="w-12 h-12 rounded-full bg-red-50 border border-red-200 text-red-600 flex items-center justify-center mx-auto font-bold text-lg">
+              !
+            </div>
+            <h2 className="text-lg font-bold font-display text-[#231815]">
+              Acesso Restrito ao Grupo "{activeGroup.name}"
+            </h2>
+            <p className="text-xs text-[#73645B] leading-relaxed">
+              O perfil atual (<strong>{currentMemberName}</strong>) não possui autorização para visualizar ou editar as demandas compartilhadas deste grupo de trabalho. Apenas integrantes cadastrados no grupo têm permissão de acesso.
+            </p>
+            <div className="pt-2 flex flex-wrap items-center justify-center gap-2">
+              {activeGroup.members.map((m) => (
+                <button
+                  key={m.id}
+                  type="button"
+                  onClick={() => handleChangeMemberName(m.name)}
+                  className="px-3.5 py-2 rounded-lg bg-[#6A3102] hover:bg-[#542601] text-white text-xs font-semibold transition-colors cursor-pointer"
+                >
+                  Entrar como {m.name} ({m.role === 'admin' ? 'Admin' : 'Membro'})
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <>
         {currentTab === 'dashboard' && (
           <Dashboard
-            tasks={tasks}
+            tasks={visibleGroupTasks}
             settings={settings}
             overallRisk={overallRisk}
             workgroups={workgroups}
@@ -811,7 +921,7 @@ export default function App() {
 
         {currentTab === 'today' && (
           <TodayPlanner
-            tasks={tasks}
+            tasks={visibleGroupTasks}
             settings={settings}
             onToggleStageCompleted={handleToggleStageCompleted}
             onOpenReschedule={(task) => setRescheduleTaskTarget(task)}
@@ -823,7 +933,7 @@ export default function App() {
 
         {currentTab === 'calendar' && (
           <CalendarView
-            tasks={tasks}
+            tasks={visibleGroupTasks}
             onSelectTask={(task) => setSelectedTask(task)}
             onOpenGoogleCalendar={() => setIsGoogleCalendarModalOpen(true)}
             isGoogleConnected={!!googleToken}
@@ -832,7 +942,7 @@ export default function App() {
 
         {currentTab === 'approvals' && (
           <ApprovalsView
-            tasks={tasks}
+            tasks={visibleGroupTasks}
             onUpdateStatus={handleUpdateStatus}
             onSelectTask={(task) => setSelectedTask(task)}
             onOpenReschedule={(task) => setRescheduleTaskTarget(task)}
@@ -842,7 +952,7 @@ export default function App() {
         {/* ÁREA DE EQUIPE (Requirement 5) */}
         {currentTab === 'team' && (
           <TeamView
-            tasks={tasks}
+            tasks={visibleGroupTasks}
             workgroups={workgroups}
             activeGroupId={activeGroupId}
             onSelectGroup={handleSelectGroup}
@@ -863,7 +973,7 @@ export default function App() {
 
         {currentTab === 'assistant' && (
           <ProductionAssistant
-            tasks={tasks}
+            tasks={visibleGroupTasks}
             settings={settings}
             overallRisk={overallRisk}
             onSelectTask={(task) => setSelectedTask(task)}
@@ -872,6 +982,8 @@ export default function App() {
               setIsTaskModalOpen(true);
             }}
           />
+        )}
+          </>
         )}
       </main>
 

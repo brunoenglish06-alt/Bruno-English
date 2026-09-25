@@ -154,6 +154,9 @@ export interface Task {
   repeatedFromTaskId?: string;
   createdAt: string;
   updatedAt: string;
+  updatedBy?: string;
+  updatedByEmail?: string;
+  version?: number;
   deliveredAt?: string;
   notes?: string;
   googleCalendarEventId?: string;
@@ -176,6 +179,8 @@ export interface WorkGroup {
   adminId: string;
   createdAt: string;
   updatedAt?: string;
+  updatedBy?: string;
+  isPrivate?: boolean;
   members: WorkGroupMember[];
 }
 

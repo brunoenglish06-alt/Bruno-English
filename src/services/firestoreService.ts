@@ -4,16 +4,70 @@ import {
   doc,
   setDoc,
   deleteDoc,
+  onSnapshot,
   getDocFromServer
 } from 'firebase/firestore';
 import { getApps, initializeApp, getApp } from 'firebase/app';
 import firebaseConfig from '../../firebase-applet-config.json';
 import { Task, WorkGroup } from '../types';
+import { auth } from './firebaseAuth';
 import { loadTasks, saveTasks } from '../utils/storage';
 
-// Initialize Firebase App singleton (secondary cloud backup)
+// CRITICAL: Connect to the provisioned Cloud Firestore database ID from firebase-applet-config.json
 const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
-export const db = getFirestore(app);
+export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+
+export enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write'
+}
+
+export interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId?: string | null;
+    email?: string | null;
+    emailVerified?: boolean | null;
+    isAnonymous?: boolean | null;
+    tenantId?: string | null;
+    providerInfo?: {
+      providerId?: string | null;
+      email?: string | null;
+    }[];
+  };
+}
+
+export function handleFirestoreError(
+  error: unknown,
+  operationType: OperationType,
+  path: string | null
+): void {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: auth.currentUser?.uid,
+      email: auth.currentUser?.email,
+      emailVerified: auth.currentUser?.emailVerified,
+      isAnonymous: auth.currentUser?.isAnonymous,
+      tenantId: auth.currentUser?.tenantId,
+      providerInfo:
+        auth.currentUser?.providerData?.map((provider) => ({
+          providerId: provider.providerId,
+          email: provider.email
+        })) || []
+    },
+    operationType,
+    path
+  };
+  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  updateSyncStatus('error', errInfo.error);
+}
 
 function sanitizeForFirestore<T>(data: T): T {
   return JSON.parse(JSON.stringify(data));
@@ -26,7 +80,7 @@ const STORAGE_KEY_DELETED_TASKS = 'oip_deleted_tasks_v1';
 const STORAGE_KEY_MEMBER_NAME = 'oip_active_member_name_v1';
 const SESSION_KEY_CLIENT_ID = 'oip_client_session_id_v1';
 
-// Unique session ID for this browser tab/window
+// Unique session ID for this browser tab/computer
 export const CLIENT_ID: string = (() => {
   try {
     let existing = sessionStorage.getItem(SESSION_KEY_CLIENT_ID);
@@ -40,14 +94,20 @@ export const CLIENT_ID: string = (() => {
   }
 })();
 
+export type SyncConnectionStatus = 'synced' | 'syncing' | 'offline' | 'error';
+
 export interface PresenceInfo {
   onlineCount: number;
   onlineMembers: Array<{
     clientId: string;
     memberName: string;
+    memberEmail?: string;
+    groupId?: string;
     lastSeen: number;
   }>;
   isConnected: boolean;
+  syncStatus: SyncConnectionStatus;
+  syncErrorMessage?: string | null;
   lastSyncedAt: string | null;
 }
 
@@ -56,8 +116,59 @@ export interface RealtimeActivityEvent {
   type: string;
   actorId: string;
   actorName: string;
+  groupId?: string;
   summary: string;
   timestamp: string;
+}
+
+// ============================================================================
+// AUTHORIZATION & GROUP PERMISSIONS (Requirement 6)
+// ============================================================================
+
+export function isUserAuthorizedForGroup(
+  group: WorkGroup | undefined | null,
+  userEmail?: string | null,
+  memberName?: string | null,
+  userUid?: string | null
+): boolean {
+  if (!group) return false;
+  const members = Array.isArray(group.members) ? group.members : [];
+
+  const normEmail = (userEmail || '').trim().toLowerCase();
+  const normName = (memberName || '').trim().toLowerCase();
+
+  if (userUid && group.adminId === userUid) return true;
+
+  return members.some((m) => {
+    const mEmail = (m.email || '').trim().toLowerCase();
+    const mName = (m.name || '').trim().toLowerCase();
+    if (normEmail && mEmail && normEmail === mEmail) return true;
+    if (normName && mName && normName === mName) return true;
+    return false;
+  });
+}
+
+export function getUserRoleInGroup(
+  group: WorkGroup | undefined | null,
+  userEmail?: string | null,
+  memberName?: string | null,
+  userUid?: string | null
+): 'admin' | 'member' | 'unauthorized' {
+  if (!group) return 'unauthorized';
+  const members = Array.isArray(group.members) ? group.members : [];
+  const normEmail = (userEmail || '').trim().toLowerCase();
+  const normName = (memberName || '').trim().toLowerCase();
+
+  if (userUid && group.adminId === userUid) return 'admin';
+
+  const matched = members.find((m) => {
+    const mEmail = (m.email || '').trim().toLowerCase();
+    const mName = (m.name || '').trim().toLowerCase();
+    return (normEmail && mEmail === normEmail) || (normName && mName === normName);
+  });
+
+  if (!matched) return 'unauthorized';
+  return matched.role === 'admin' ? 'admin' : 'member';
 }
 
 export function getCurrentMemberName(): string {
@@ -73,7 +184,7 @@ export function setCurrentMemberName(name: string): void {
     const trimmed = name.trim();
     if (!trimmed) return;
     localStorage.setItem(STORAGE_KEY_MEMBER_NAME, trimmed);
-    sendRealtimeMutation('presence:update', { memberName: trimmed }).catch(() => {});
+    publishPresenceToFirestore().catch(() => {});
   } catch (e) {
     console.error('Error setting member name', e);
   }
@@ -181,17 +292,30 @@ export const DEFAULT_INITIAL_GROUP: WorkGroup = {
   ]
 };
 
-// Test firestore connection per skill instructions
+// Validate connection to Firestore server per skill instructions
 export async function testFirestoreConnection(): Promise<boolean> {
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    updateSyncStatus('offline', 'Sem conexão com a internet.');
+    return false;
+  }
   try {
     await getDocFromServer(doc(db, 'system', 'connection_probe'));
+    if (pendingWritesCount === 0) {
+      updateSyncStatus('synced', null);
+    }
     return true;
-  } catch {
+  } catch (error: any) {
+    if (error instanceof Error && error.message.includes('the client is offline')) {
+      console.error('Please check your Firebase configuration.');
+      updateSyncStatus('offline', 'Cliente sem conexão com o servidor Cloud Firestore.');
+      return false;
+    }
+    handleFirestoreError(error, OperationType.GET, 'system/connection_probe');
     return false;
   }
 }
 
-// Local cache helpers
+// Local cache helpers (used only as fast initial hydration; Cloud Firestore is the source of truth)
 export function loadCachedWorkgroups(): WorkGroup[] {
   try {
     const deletedIds = getDeletedGroupIds();
@@ -243,7 +367,7 @@ export function setActiveGroupId(id: string): void {
 }
 
 // ============================================================================
-// REAL-TIME MULTI-USER ENGINE (SSE + Fast Delta Poll + BroadcastChannel)
+// CLOUD FIRESTORE REAL-TIME ENGINE (onSnapshot)
 // ============================================================================
 
 const workgroupListeners = new Set<(groups: WorkGroup[]) => void>();
@@ -251,11 +375,14 @@ const taskListeners = new Set<(tasks: Task[]) => void>();
 const presenceListeners = new Set<(presence: PresenceInfo) => void>();
 const activityListeners = new Set<(event: RealtimeActivityEvent) => void>();
 
-let currentServerVersion = 0;
 let isEngineStarted = false;
-let eventSourceInstance: EventSource | null = null;
+let tombstonesLoaded = false;
+let initialGroupsMigrated = false;
+let initialTasksMigrated = false;
+let pendingWritesCount = 0;
 let broadcastChannel: BroadcastChannel | null = null;
 let seenEventIds = new Set<string>();
+let isFirstTombstoneSnapshot = true;
 
 let currentPresence: PresenceInfo = {
   onlineCount: 1,
@@ -267,8 +394,35 @@ let currentPresence: PresenceInfo = {
     }
   ],
   isConnected: true,
-  lastSyncedAt: new Date().toISOString()
+  syncStatus: 'syncing',
+  syncErrorMessage: null,
+  lastSyncedAt: null
 };
+
+function updateSyncStatus(status: SyncConnectionStatus, errorMsg?: string | null) {
+  currentPresence = {
+    ...currentPresence,
+    isConnected: status === 'synced' || status === 'syncing',
+    syncStatus: status,
+    syncErrorMessage: errorMsg ?? (status === 'error' ? currentPresence.syncErrorMessage : null),
+    lastSyncedAt: status === 'synced' ? new Date().toISOString() : currentPresence.lastSyncedAt
+  };
+  notifyPresenceListeners(currentPresence);
+}
+
+function beginWriteOperation() {
+  pendingWritesCount += 1;
+  updateSyncStatus('syncing', null);
+}
+
+function endWriteOperation(succeeded: boolean, errorMsg?: string) {
+  pendingWritesCount = Math.max(0, pendingWritesCount - 1);
+  if (!succeeded) {
+    updateSyncStatus('error', errorMsg || 'Erro ao sincronizar dados com o banco online.');
+  } else if (pendingWritesCount === 0) {
+    updateSyncStatus('synced', null);
+  }
+}
 
 function notifyWorkgroupListeners(groups: WorkGroup[]) {
   for (const listener of workgroupListeners) {
@@ -308,7 +462,6 @@ function notifyActivityListeners(event: RealtimeActivityEvent) {
     const arr = Array.from(seenEventIds);
     seenEventIds = new Set(arr.slice(arr.length - 50));
   }
-  // Only notify UI toast if the action was triggered by another tab/user
   if (event.actorId && event.actorId !== CLIENT_ID) {
     for (const listener of activityListeners) {
       try {
@@ -320,268 +473,291 @@ function notifyActivityListeners(event: RealtimeActivityEvent) {
   }
 }
 
-function applyServerState(
-  serverState: {
-    version?: number;
-    workgroups?: WorkGroup[];
-    tasks?: Task[];
-    deletedGroupIds?: string[];
-    deletedTaskIds?: string[];
-    recentEvents?: RealtimeActivityEvent[];
-  },
-  presence?: {
-    onlineCount: number;
-    onlineMembers: Array<{ clientId: string; memberName: string; lastSeen: number }>;
-  },
-  incomingEvent?: RealtimeActivityEvent | null
-) {
-  if (!serverState) return;
+async function publishTombstonesAndActivity(eventSummary?: string, eventType?: string): Promise<void> {
+  const path = 'system/tombstones';
+  try {
+    const deletedGroupIds = Array.from(getDeletedGroupIds());
+    const deletedTaskIds = Array.from(getDeletedTaskIds());
+    const now = new Date().toISOString();
 
-  if (typeof serverState.version === 'number') {
-    currentServerVersion = serverState.version;
-  }
+    const payload: Record<string, any> = {
+      deletedGroupIds,
+      deletedTaskIds,
+      updatedAt: now
+    };
 
-  if (Array.isArray(serverState.deletedGroupIds)) {
-    setDeletedGroupIds(serverState.deletedGroupIds);
-  }
-
-  if (Array.isArray(serverState.deletedTaskIds)) {
-    setDeletedTaskIds(serverState.deletedTaskIds);
-  }
-
-  const deletedGroups = getDeletedGroupIds();
-  const deletedTasks = getDeletedTaskIds();
-
-  if (Array.isArray(serverState.workgroups)) {
-    const cleanGroups = serverState.workgroups
-      .filter((g) => g && g.id && !deletedGroups.has(g.id))
-      .map((g) => ({
-        ...g,
-        members: Array.isArray(g.members) ? g.members : []
-      }));
-    saveCachedWorkgroups(cleanGroups);
-    notifyWorkgroupListeners(cleanGroups);
-  }
-
-  if (Array.isArray(serverState.tasks)) {
-    const cleanTasks = serverState.tasks.filter((t) => t && t.id && !deletedTasks.has(t.id));
-    saveTasks(cleanTasks);
-    notifyTaskListeners(cleanTasks);
-  }
-
-  if (incomingEvent) {
-    notifyActivityListeners(incomingEvent);
-  } else if (Array.isArray(serverState.recentEvents) && serverState.recentEvents.length > 0) {
-    // Mark initial events as seen on first boot so we don't toast old history
-    for (const ev of serverState.recentEvents) {
-      if (ev && ev.id) seenEventIds.add(ev.id);
+    if (eventSummary) {
+      const eventObj: RealtimeActivityEvent = {
+        id: 'evt-' + Date.now() + '-' + Math.random().toString(36).substring(2, 6),
+        type: eventType || 'update',
+        actorId: CLIENT_ID,
+        actorName: getCurrentMemberName(),
+        groupId: getActiveGroupId(),
+        summary: eventSummary,
+        timestamp: now
+      };
+      seenEventIds.add(eventObj.id);
+      payload.lastEvent = eventObj;
     }
-  }
 
-  notifyPresenceListeners({
-    onlineCount: presence?.onlineCount || currentPresence.onlineCount || 1,
-    onlineMembers: presence?.onlineMembers || currentPresence.onlineMembers,
-    isConnected: true,
-    lastSyncedAt: new Date().toISOString()
-  });
+    await setDoc(doc(db, 'system', 'tombstones'), sanitizeForFirestore(payload), { merge: true });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
 }
 
-async function sendRealtimeMutation(action: string, payload: Record<string, any>): Promise<void> {
-  // Broadcast immediately to other open tabs on the same browser (0ms latency)
+async function publishPresenceToFirestore(): Promise<void> {
+  if (typeof navigator !== 'undefined' && !navigator.onLine) return;
+  const path = `presence/${CLIENT_ID}`;
   try {
-    broadcastChannel?.postMessage({
-      type: 'local_mutation',
-      action,
-      payload,
-      senderClientId: CLIENT_ID,
-      actorName: getCurrentMemberName(),
-      timestamp: new Date().toISOString()
-    });
-  } catch {
-    // Ignore BroadcastChannel errors
-  }
-
-  try {
-    const response = await fetch('/api/realtime/mutate', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        action,
-        payload,
+    await setDoc(
+      doc(db, 'presence', CLIENT_ID),
+      sanitizeForFirestore({
         clientId: CLIENT_ID,
-        actorName: getCurrentMemberName()
-      })
-    });
-
-    if (response.ok) {
-      const data = await response.json();
-      if (data && data.state) {
-        applyServerState(data.state, data.presence, null);
-      }
-    }
-  } catch (err) {
-    console.warn('Realtime server mutation fallback to local cache:', err);
-  }
-}
-
-export async function forceRealtimeSyncNow(): Promise<void> {
-  try {
-    const res = await fetch(
-      `/api/realtime/state?clientId=${encodeURIComponent(CLIENT_ID)}&memberName=${encodeURIComponent(
-        getCurrentMemberName()
-      )}&sinceVersion=0`,
-      { cache: 'no-store' }
+        memberName: getCurrentMemberName(),
+        memberEmail: auth.currentUser?.email || '',
+        groupId: getActiveGroupId(),
+        lastSeen: Date.now(),
+        updatedAt: new Date().toISOString()
+      }),
+      { merge: true }
     );
-    if (res.ok) {
-      const data = await res.json();
-      if (data && data.state) {
-        applyServerState(data.state, data.presence, null);
-      }
-    }
-  } catch (err) {
-    console.warn('Manual sync check failed:', err);
+  } catch {
+    // Non-critical presence heartbeat
   }
 }
 
-function connectSSEStream() {
-  try {
-    if (eventSourceInstance) {
-      eventSourceInstance.close();
-      eventSourceInstance = null;
-    }
-
-    const url = `/api/realtime/stream?clientId=${encodeURIComponent(
-      CLIENT_ID
-    )}&memberName=${encodeURIComponent(getCurrentMemberName())}`;
-    const es = new EventSource(url);
-    eventSourceInstance = es;
-
-    es.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        if (!data) return;
-
-        if (data.type === 'init' || data.type === 'state:sync') {
-          if (data.state) {
-            applyServerState(data.state, data.presence, data.event || null);
-          }
-        } else if (data.type === 'presence:update' && data.presence) {
-          notifyPresenceListeners({
-            ...currentPresence,
-            onlineCount: data.presence.onlineCount,
-            onlineMembers: data.presence.onlineMembers,
-            isConnected: true
-          });
-        }
-      } catch (e) {
-        console.warn('Failed to parse SSE message:', e);
-      }
-    };
-
-    es.onerror = () => {
-      notifyPresenceListeners({
-        ...currentPresence,
-        isConnected: false
-      });
-    };
-  } catch (e) {
-    console.warn('SSE connection error:', e);
-  }
-}
-
-function startRealtimeEngine() {
+function startFirestoreRealtimeEngine() {
   if (isEngineStarted || typeof window === 'undefined') return;
   isEngineStarted = true;
 
-  // 1. Setup BroadcastChannel for instant 0ms cross-tab sync
+  // Monitor browser online/offline state
+  window.addEventListener('online', () => {
+    updateSyncStatus('syncing', null);
+    testFirestoreConnection();
+    publishPresenceToFirestore();
+  });
+  window.addEventListener('offline', () => {
+    updateSyncStatus('offline', 'Sem conexão com a internet.');
+  });
+
+  // Same-browser cross-tab BroadcastChannel for 0ms local tab updates
   try {
     if ('BroadcastChannel' in window) {
-      broadcastChannel = new BroadcastChannel('oip_realtime_sync_v2');
+      broadcastChannel = new BroadcastChannel('oip_firestore_realtime_v3');
       broadcastChannel.onmessage = (ev) => {
         const msg = ev.data;
         if (!msg || msg.senderClientId === CLIENT_ID) return;
-        // Reload from shared localStorage and also trigger server delta check
         notifyWorkgroupListeners(loadCachedWorkgroups());
         notifyTaskListeners(loadTasks());
-        forceRealtimeSyncNow().catch(() => {});
       };
     }
   } catch {
-    // BroadcastChannel not supported in this browser environment
+    // Ignore if BroadcastChannel is unavailable
   }
 
-  // 2. Listen to window 'storage' events (fires when another tab modifies localStorage)
-  window.addEventListener('storage', (e) => {
-    if (
-      e.key === STORAGE_KEY_WORKGROUPS ||
-      e.key === STORAGE_KEY_DELETED_WORKGROUPS
-    ) {
-      notifyWorkgroupListeners(loadCachedWorkgroups());
-    }
-    if (
-      e.key === 'oip_tasks_v1' ||
-      e.key === STORAGE_KEY_DELETED_TASKS
-    ) {
-      notifyTaskListeners(loadTasks());
-    }
-  });
-
-  // 3. Initial handshake with server: send any local cached data so server merges non-deleted items
-  const initialGroups = loadCachedWorkgroups();
-  const initialTasks = loadTasks();
-  sendRealtimeMutation('client:handshake', {
-    workgroups: initialGroups,
-    tasks: initialTasks
-  }).finally(() => {
-    // 4. Connect SSE stream for instant push updates
-    connectSSEStream();
-  });
-
-  // 5. Fast delta polling every 1.5s as a rock-solid guarantee through any proxy/iframe
-  setInterval(async () => {
-    try {
-      const res = await fetch(
-        `/api/realtime/state?clientId=${encodeURIComponent(
-          CLIENT_ID
-        )}&memberName=${encodeURIComponent(
-          getCurrentMemberName()
-        )}&sinceVersion=${currentServerVersion}`,
-        { cache: 'no-store' }
-      );
-      if (res.ok) {
-        const data = await res.json();
-        if (data.hasChanges && data.state) {
-          const latestEvent =
-            Array.isArray(data.state.recentEvents) && data.state.recentEvents.length > 0
-              ? data.state.recentEvents[0]
-              : null;
-          applyServerState(data.state, data.presence, latestEvent);
-        } else if (data.presence) {
-          notifyPresenceListeners({
-            ...currentPresence,
-            onlineCount: data.presence.onlineCount,
-            onlineMembers: data.presence.onlineMembers,
-            isConnected: true,
-            lastSyncedAt: new Date().toISOString()
-          });
+  // 1. Subscribe to /system/tombstones (deleted IDs & live cross-computer activity notifications)
+  const tombstonesRef = doc(db, 'system', 'tombstones');
+  onSnapshot(
+    tombstonesRef,
+    (snapshot) => {
+      if (snapshot.exists()) {
+        const data = snapshot.data();
+        if (Array.isArray(data.deletedGroupIds)) {
+          const merged = new Set([...getDeletedGroupIds(), ...data.deletedGroupIds]);
+          setDeletedGroupIds(Array.from(merged));
+        }
+        if (Array.isArray(data.deletedTaskIds)) {
+          const merged = new Set([...getDeletedTaskIds(), ...data.deletedTaskIds]);
+          setDeletedTaskIds(Array.from(merged));
+        }
+        if (data.lastEvent) {
+          if (isFirstTombstoneSnapshot) {
+            seenEventIds.add(data.lastEvent.id);
+          } else {
+            notifyActivityListeners(data.lastEvent as RealtimeActivityEvent);
+          }
         }
       }
-    } catch {
-      // Offline or reconnecting
+      isFirstTombstoneSnapshot = false;
+      tombstonesLoaded = true;
+    },
+    (error) => {
+      tombstonesLoaded = true;
+      handleFirestoreError(error, OperationType.GET, 'system/tombstones');
     }
-  }, 1500);
+  );
 
-  // 6. Sync immediately when user focuses tab or returns to page
-  window.addEventListener('focus', () => {
-    forceRealtimeSyncNow().catch(() => {});
-  });
-  document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') {
-      forceRealtimeSyncNow().catch(() => {});
+  // 2. Real-time onSnapshot listener for /workgroups
+  const workgroupsCol = collection(db, 'workgroups');
+  onSnapshot(
+    workgroupsCol,
+    { includeMetadataChanges: true },
+    (snapshot) => {
+      const deletedGroups = getDeletedGroupIds();
+      const serverGroupsMap = new Map<string, WorkGroup>();
+
+      snapshot.forEach((docSnap) => {
+        const data = docSnap.data() as WorkGroup;
+        if (data && data.id && !deletedGroups.has(data.id)) {
+          serverGroupsMap.set(data.id, {
+            ...data,
+            members: Array.isArray(data.members) ? data.members : []
+          });
+        }
+      });
+
+      // On first snapshot, migrate any local workgroups that aren't in Firestore yet (and aren't deleted)
+      if (!initialGroupsMigrated && tombstonesLoaded) {
+        initialGroupsMigrated = true;
+        const localGroups = loadCachedWorkgroups();
+        for (const lg of localGroups) {
+          if (deletedGroups.has(lg.id)) continue;
+          const sg = serverGroupsMap.get(lg.id);
+          if (!sg) {
+            serverGroupsMap.set(lg.id, lg);
+            setDoc(doc(db, 'workgroups', lg.id), sanitizeForFirestore(lg), { merge: true }).catch(
+              (err) => handleFirestoreError(err, OperationType.WRITE, `workgroups/${lg.id}`)
+            );
+          } else {
+            const localTime = lg.updatedAt ? new Date(lg.updatedAt).getTime() : 0;
+            const serverTime = sg.updatedAt ? new Date(sg.updatedAt).getTime() : 0;
+            if (localTime > serverTime) {
+              serverGroupsMap.set(lg.id, lg);
+              setDoc(doc(db, 'workgroups', lg.id), sanitizeForFirestore(lg), { merge: true }).catch(
+                (err) => handleFirestoreError(err, OperationType.WRITE, `workgroups/${lg.id}`)
+              );
+            }
+          }
+        }
+      }
+
+      const groupsList = Array.from(serverGroupsMap.values());
+      saveCachedWorkgroups(groupsList);
+      notifyWorkgroupListeners(groupsList);
+
+      if (snapshot.metadata.hasPendingWrites || pendingWritesCount > 0) {
+        updateSyncStatus('syncing', null);
+      } else if (!snapshot.metadata.fromCache || navigator.onLine) {
+        updateSyncStatus('synced', null);
+      }
+    },
+    (error) => {
+      handleFirestoreError(error, OperationType.LIST, 'workgroups');
     }
-  });
+  );
+
+  // 3. Real-time onSnapshot listener for /tasks
+  const tasksCol = collection(db, 'tasks');
+  onSnapshot(
+    tasksCol,
+    { includeMetadataChanges: true },
+    (snapshot) => {
+      const deletedTasks = getDeletedTaskIds();
+      const serverTasksMap = new Map<string, Task>();
+
+      snapshot.forEach((docSnap) => {
+        const data = docSnap.data() as Task;
+        if (data && data.id && !deletedTasks.has(data.id)) {
+          serverTasksMap.set(data.id, data);
+        }
+      });
+
+      // On first snapshot, migrate any existing local tasks to Firestore without losing user data
+      if (!initialTasksMigrated && tombstonesLoaded) {
+        initialTasksMigrated = true;
+        const localTasks = loadTasks();
+        for (const lt of localTasks) {
+          if (!lt || !lt.id || deletedTasks.has(lt.id)) continue;
+          const st = serverTasksMap.get(lt.id);
+          if (!st) {
+            serverTasksMap.set(lt.id, lt);
+            setDoc(doc(db, 'tasks', lt.id), sanitizeForFirestore(lt), { merge: true }).catch(
+              (err) => handleFirestoreError(err, OperationType.WRITE, `tasks/${lt.id}`)
+            );
+          } else {
+            const localTime = lt.updatedAt ? new Date(lt.updatedAt).getTime() : 0;
+            const serverTime = st.updatedAt ? new Date(st.updatedAt).getTime() : 0;
+            if (localTime > serverTime) {
+              serverTasksMap.set(lt.id, lt);
+              setDoc(doc(db, 'tasks', lt.id), sanitizeForFirestore(lt), { merge: true }).catch(
+                (err) => handleFirestoreError(err, OperationType.WRITE, `tasks/${lt.id}`)
+              );
+            }
+          }
+        }
+      }
+
+      const tasksList = Array.from(serverTasksMap.values());
+      saveTasks(tasksList);
+      notifyTaskListeners(tasksList);
+
+      if (snapshot.metadata.hasPendingWrites || pendingWritesCount > 0) {
+        updateSyncStatus('syncing', null);
+      } else if (!snapshot.metadata.fromCache || navigator.onLine) {
+        updateSyncStatus('synced', null);
+      }
+    },
+    (error) => {
+      handleFirestoreError(error, OperationType.LIST, 'tasks');
+    }
+  );
+
+  // 4. Real-time onSnapshot listener for /presence across all connected computers
+  publishPresenceToFirestore();
+  setInterval(() => {
+    publishPresenceToFirestore();
+  }, 20000);
+
+  const presenceCol = collection(db, 'presence');
+  onSnapshot(
+    presenceCol,
+    (snapshot) => {
+      const now = Date.now();
+      const activeMembers: Array<{
+        clientId: string;
+        memberName: string;
+        memberEmail?: string;
+        groupId?: string;
+        lastSeen: number;
+      }> = [];
+
+      snapshot.forEach((docSnap) => {
+        const data = docSnap.data();
+        if (data && data.clientId && typeof data.lastSeen === 'number') {
+          // Consider active if seen within the last 60 seconds
+          if (now - data.lastSeen < 65000 || data.clientId === CLIENT_ID) {
+            activeMembers.push({
+              clientId: data.clientId,
+              memberName: data.memberName || 'Integrante',
+              memberEmail: data.memberEmail || '',
+              groupId: data.groupId || '',
+              lastSeen: data.lastSeen
+            });
+          }
+        }
+      });
+
+      if (!activeMembers.some((m) => m.clientId === CLIENT_ID)) {
+        activeMembers.push({
+          clientId: CLIENT_ID,
+          memberName: getCurrentMemberName(),
+          memberEmail: auth.currentUser?.email || '',
+          groupId: getActiveGroupId(),
+          lastSeen: now
+        });
+      }
+
+      notifyPresenceListeners({
+        ...currentPresence,
+        onlineCount: Math.max(1, activeMembers.length),
+        onlineMembers: activeMembers
+      });
+    },
+    () => {
+      // Ignore non-critical presence read errors
+    }
+  );
 }
 
 // ============================================================================
@@ -589,7 +765,7 @@ function startRealtimeEngine() {
 // ============================================================================
 
 export function subscribeWorkgroups(onUpdate: (groups: WorkGroup[]) => void) {
-  startRealtimeEngine();
+  startFirestoreRealtimeEngine();
   workgroupListeners.add(onUpdate);
   onUpdate(loadCachedWorkgroups());
 
@@ -602,7 +778,7 @@ export function subscribeTasks(
   groupIdOrCallback: string | null | ((tasks: Task[]) => void),
   maybeCallback?: (tasks: Task[]) => void
 ) {
-  startRealtimeEngine();
+  startFirestoreRealtimeEngine();
   const onUpdate =
     typeof groupIdOrCallback === 'function' ? groupIdOrCallback : maybeCallback!;
 
@@ -619,7 +795,7 @@ export function subscribeTasks(
 }
 
 export function subscribePresence(onUpdate: (presence: PresenceInfo) => void) {
-  startRealtimeEngine();
+  startFirestoreRealtimeEngine();
   presenceListeners.add(onUpdate);
   onUpdate(currentPresence);
 
@@ -629,7 +805,7 @@ export function subscribePresence(onUpdate: (presence: PresenceInfo) => void) {
 }
 
 export function subscribeRealtimeActivity(onEvent: (event: RealtimeActivityEvent) => void) {
-  startRealtimeEngine();
+  startFirestoreRealtimeEngine();
   activityListeners.add(onEvent);
 
   return () => {
@@ -637,150 +813,245 @@ export function subscribeRealtimeActivity(onEvent: (event: RealtimeActivityEvent
   };
 }
 
-// Save or Update Workgroup (instant local update + real-time server broadcast)
+export async function forceRealtimeSyncNow(): Promise<void> {
+  updateSyncStatus('syncing', null);
+  await testFirestoreConnection();
+  await publishPresenceToFirestore();
+}
+
+// Save or Update Workgroup in Cloud Firestore
 export async function saveWorkgroupToFirestore(
   group: WorkGroup,
   summary?: string
 ): Promise<void> {
+  const path = `workgroups/${group.id}`;
   unmarkGroupDeleted(group.id);
+  const actor = getCurrentMemberName();
   const groupWithTime: WorkGroup = {
     ...group,
-    updatedAt: new Date().toISOString()
+    updatedAt: new Date().toISOString(),
+    updatedBy: actor,
+    members: Array.isArray(group.members) ? group.members : []
   };
 
-  // Update local cache immediately for zero latency
+  // Optimistic local cache update
   const current = loadCachedWorkgroups();
   const index = current.findIndex((g) => g.id === groupWithTime.id);
-  let updated: WorkGroup[];
-  if (index >= 0) {
-    updated = [...current];
-    updated[index] = groupWithTime;
-  } else {
-    updated = [...current, groupWithTime];
-  }
+  const updated =
+    index >= 0
+      ? current.map((g, i) => (i === index ? groupWithTime : g))
+      : [...current, groupWithTime];
   saveCachedWorkgroups(updated);
   notifyWorkgroupListeners(updated);
+  broadcastChannel?.postMessage({ senderClientId: CLIENT_ID });
 
-  // Sync to real-time server
-  await sendRealtimeMutation('workgroup:upsert', {
-    group: groupWithTime,
-    summary
-  });
-
-  // Secondary Firestore cloud backup (non-blocking)
+  beginWriteOperation();
   try {
     const docRef = doc(db, 'workgroups', groupWithTime.id);
-    setDoc(docRef, sanitizeForFirestore(groupWithTime), { merge: true }).catch(() => {});
-  } catch {
-    // Ignore secondary backup errors
+    await setDoc(docRef, sanitizeForFirestore(groupWithTime), { merge: true });
+    await publishTombstonesAndActivity(
+      summary || `${actor} atualizou o grupo "${groupWithTime.name}"`,
+      'workgroup:upsert'
+    );
+    endWriteOperation(true);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
+    endWriteOperation(false, error instanceof Error ? error.message : String(error));
   }
 }
 
-// Delete Workgroup (instant local removal + real-time server broadcast)
+// Delete Workgroup from Cloud Firestore
 export async function deleteWorkgroupFromFirestore(
   groupId: string,
   deleteAssociatedTasks: boolean = false,
   nextGroupId: string = ''
 ): Promise<void> {
+  const path = `workgroups/${groupId}`;
+  const actor = getCurrentMemberName();
+  const targetGroup = loadCachedWorkgroups().find((g) => g.id === groupId);
   markGroupDeleted(groupId);
+
   const current = loadCachedWorkgroups().filter((g) => g.id !== groupId);
   saveCachedWorkgroups(current);
   notifyWorkgroupListeners(current);
+  broadcastChannel?.postMessage({ senderClientId: CLIENT_ID });
 
-  await sendRealtimeMutation('workgroup:delete', {
-    groupId,
-    deleteAssociatedTasks,
-    nextGroupId
-  });
-
+  beginWriteOperation();
   try {
-    const docRef = doc(db, 'workgroups', groupId);
-    deleteDoc(docRef).catch(() => {});
-  } catch {
-    // Ignore secondary backup errors
+    await publishTombstonesAndActivity(
+      `${actor} apagou o grupo "${targetGroup?.name || groupId}"`,
+      'workgroup:delete'
+    );
+    await deleteDoc(doc(db, 'workgroups', groupId));
+
+    // Handle tasks associated with the deleted group
+    const allTasks = loadTasks();
+    for (const t of allTasks) {
+      if (t.groupId === groupId) {
+        if (deleteAssociatedTasks) {
+          markTaskDeleted(t.id);
+          await deleteDoc(doc(db, 'tasks', t.id));
+        } else {
+          const reassigned: Task = {
+            ...t,
+            groupId: nextGroupId || undefined,
+            updatedAt: new Date().toISOString(),
+            updatedBy: actor
+          };
+          await setDoc(doc(db, 'tasks', t.id), sanitizeForFirestore(reassigned), { merge: true });
+        }
+      }
+    }
+    if (deleteAssociatedTasks) {
+      await publishTombstonesAndActivity();
+    }
+    endWriteOperation(true);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, path);
+    endWriteOperation(false, error instanceof Error ? error.message : String(error));
   }
 }
 
-// Save or Update single task (instant local update + real-time server broadcast)
+// Save or Update single task in Cloud Firestore
 export async function syncTaskToFirestore(task: Task, summary?: string): Promise<void> {
+  const path = `tasks/${task.id}`;
   unmarkTaskDeleted(task.id);
-  const taskWithTime: Task = {
-    ...task,
-    updatedAt: new Date().toISOString()
-  };
+  const actor = getCurrentMemberName();
+  const now = new Date().toISOString();
 
   const current = loadTasks();
-  const idx = current.findIndex((t) => t.id === taskWithTime.id);
-  let updated: Task[];
-  if (idx >= 0) {
-    updated = [...current];
-    updated[idx] = taskWithTime;
-  } else {
-    updated = [taskWithTime, ...current];
-  }
+  const existing = current.find((t) => t.id === task.id);
+  const nextVersion = (existing?.version || task.version || 0) + 1;
+
+  const historyEntry = {
+    id: 'hist-' + Date.now() + '-' + Math.random().toString(36).substring(2, 6),
+    timestamp: now,
+    author: actor,
+    action: summary || (existing ? 'Atualização da demanda' : 'Criação da demanda'),
+    details: `Versão ${nextVersion} salva no Cloud Firestore`
+  };
+
+  const taskWithMeta: Task = {
+    ...task,
+    groupId: task.groupId || getActiveGroupId(),
+    updatedAt: now,
+    updatedBy: actor,
+    updatedByEmail: auth.currentUser?.email || undefined,
+    version: nextVersion,
+    history: [historyEntry, ...(task.history || [])].slice(0, 50)
+  };
+
+  const idx = current.findIndex((t) => t.id === taskWithMeta.id);
+  const updated =
+    idx >= 0
+      ? current.map((t, i) => (i === idx ? taskWithMeta : t))
+      : [taskWithMeta, ...current];
   saveTasks(updated);
   notifyTaskListeners(updated);
+  broadcastChannel?.postMessage({ senderClientId: CLIENT_ID });
 
-  await sendRealtimeMutation('task:upsert', {
-    task: taskWithTime,
-    summary
-  });
-
+  beginWriteOperation();
   try {
-    const docRef = doc(db, 'tasks', taskWithTime.id);
-    setDoc(docRef, sanitizeForFirestore(taskWithTime), { merge: true }).catch(() => {});
-  } catch {
-    // Ignore secondary backup errors
+    const docRef = doc(db, 'tasks', taskWithMeta.id);
+    await setDoc(docRef, sanitizeForFirestore(taskWithMeta), { merge: true });
+    await publishTombstonesAndActivity(
+      summary ||
+        (existing
+          ? `${actor} atualizou a demanda "${taskWithMeta.title}"`
+          : `${actor} criou a demanda "${taskWithMeta.title}"`),
+      'task:upsert'
+    );
+    endWriteOperation(true);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
+    endWriteOperation(false, error instanceof Error ? error.message : String(error));
   }
 }
 
-// Batch sync multiple tasks
+// Batch sync multiple tasks to Cloud Firestore
 export async function syncBatchTasksToFirestore(tasks: Task[], summary?: string): Promise<void> {
+  const actor = getCurrentMemberName();
   const now = new Date().toISOString();
   const stamped = tasks.map((t) => {
     unmarkTaskDeleted(t.id);
-    return { ...t, updatedAt: t.updatedAt || now };
+    return {
+      ...t,
+      groupId: t.groupId || getActiveGroupId(),
+      updatedAt: now,
+      updatedBy: actor,
+      version: (t.version || 0) + 1
+    };
   });
   saveTasks(stamped);
   notifyTaskListeners(stamped);
+  broadcastChannel?.postMessage({ senderClientId: CLIENT_ID });
 
-  await sendRealtimeMutation('task:batch_upsert', {
-    tasks: stamped,
-    summary
-  });
+  beginWriteOperation();
+  try {
+    for (const t of stamped) {
+      await setDoc(doc(db, 'tasks', t.id), sanitizeForFirestore(t), { merge: true });
+    }
+    await publishTombstonesAndActivity(
+      summary || `${actor} sincronizou ${stamped.length} demanda(s)`,
+      'task:batch_upsert'
+    );
+    endWriteOperation(true);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, 'tasks');
+    endWriteOperation(false, error instanceof Error ? error.message : String(error));
+  }
 }
 
-// Delete task (instant local removal + real-time server broadcast)
+// Delete task from Cloud Firestore
 export async function deleteTaskFromFirestore(
   taskId: string,
   taskTitle?: string
 ): Promise<void> {
+  const path = `tasks/${taskId}`;
+  const actor = getCurrentMemberName();
   markTaskDeleted(taskId);
   const current = loadTasks().filter((t) => t.id !== taskId);
   saveTasks(current);
   notifyTaskListeners(current);
+  broadcastChannel?.postMessage({ senderClientId: CLIENT_ID });
 
-  await sendRealtimeMutation('task:delete', {
-    taskId,
-    taskTitle
-  });
-
+  beginWriteOperation();
   try {
-    const docRef = doc(db, 'tasks', taskId);
-    deleteDoc(docRef).catch(() => {});
-  } catch {
-    // Ignore secondary backup errors
+    await publishTombstonesAndActivity(
+      `${actor} excluiu a demanda "${taskTitle || taskId}"`,
+      'task:delete'
+    );
+    await deleteDoc(doc(db, 'tasks', taskId));
+    endWriteOperation(true);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, path);
+    endWriteOperation(false, error instanceof Error ? error.message : String(error));
   }
 }
 
-// Clear all tasks on server and clients
+// Clear all tasks on Cloud Firestore
 export async function clearAllTasksFromServer(): Promise<void> {
+  const actor = getCurrentMemberName();
   const current = loadTasks();
   for (const t of current) {
     markTaskDeleted(t.id);
   }
   saveTasks([]);
   notifyTaskListeners([]);
+  broadcastChannel?.postMessage({ senderClientId: CLIENT_ID });
 
-  await sendRealtimeMutation('tasks:clear', {});
+  beginWriteOperation();
+  try {
+    await publishTombstonesAndActivity(
+      `${actor} limpou todas as demandas do grupo`,
+      'tasks:clear'
+    );
+    for (const t of current) {
+      await deleteDoc(doc(db, 'tasks', t.id));
+    }
+    endWriteOperation(true);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, 'tasks');
+    endWriteOperation(false, error instanceof Error ? error.message : String(error));
+  }
 }

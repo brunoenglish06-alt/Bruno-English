@@ -80,6 +80,36 @@ export const Navbar: React.FC<NavbarProps> = ({
   };
 
   const onlineCount = presence?.onlineCount || 1;
+  const syncStatus = presence?.syncStatus || 'synced';
+
+  const syncBadgeConfig =
+    syncStatus === 'syncing'
+      ? {
+          label: 'Sincronizando...',
+          bg: 'bg-amber-50 hover:bg-amber-100/80 border-amber-200 text-amber-800',
+          dot: 'bg-amber-500',
+          ping: true
+        }
+      : syncStatus === 'offline'
+      ? {
+          label: 'Sem conexão',
+          bg: 'bg-stone-100 hover:bg-stone-200/80 border-stone-300 text-stone-700',
+          dot: 'bg-stone-500',
+          ping: false
+        }
+      : syncStatus === 'error'
+      ? {
+          label: 'Erro ao sincronizar',
+          bg: 'bg-red-50 hover:bg-red-100/80 border-red-200 text-red-800',
+          dot: 'bg-red-500',
+          ping: false
+        }
+      : {
+          label: 'Sincronizado',
+          bg: 'bg-emerald-50 hover:bg-emerald-100/80 border-emerald-200 text-emerald-800',
+          dot: 'bg-emerald-500',
+          ping: true
+        };
   return (
     <header className="sticky top-0 z-30 bg-[#FFFFFF] border-b border-[#EDE4DA] shadow-[0_1px_3px_rgba(0,0,0,0.03)]">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -205,28 +235,41 @@ export const Navbar: React.FC<NavbarProps> = ({
               <button
                 type="button"
                 onClick={() => setIsOnlineMenuOpen((prev) => !prev)}
-                title="Sincronização Online em Tempo Real • Clique para ver conectados ou alternar seu perfil na equipe"
-                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-emerald-50 hover:bg-emerald-100/80 border border-emerald-200 text-emerald-800 text-xs font-semibold transition-colors cursor-pointer"
+                title={`Status do Banco Online (Cloud Firestore): ${syncBadgeConfig.label} • Clique para gerenciar perfil ou reconectar`}
+                className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-semibold transition-colors cursor-pointer ${syncBadgeConfig.bg}`}
               >
-                <span className="relative flex h-2 w-2">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                  <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
-                </span>
-                <span className="hidden lg:inline">Online ({onlineCount})</span>
-                <span className="hidden sm:inline text-emerald-700 font-normal">•</span>
-                <span className="hidden sm:inline max-w-[90px] truncate">{currentMemberName}</span>
-                <ChevronDown className="w-3.5 h-3.5 text-emerald-700" />
+                {syncStatus === 'syncing' ? (
+                  <RefreshCw className="w-3 h-3 animate-spin text-amber-700" />
+                ) : (
+                  <span className="relative flex h-2 w-2">
+                    {syncBadgeConfig.ping && (
+                      <span
+                        className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${syncBadgeConfig.dot}`}
+                      ></span>
+                    )}
+                    <span className={`relative inline-flex rounded-full h-2 w-2 ${syncBadgeConfig.dot}`}></span>
+                  </span>
+                )}
+                <span>{syncBadgeConfig.label}</span>
+                <span className="hidden sm:inline opacity-70 font-normal">•</span>
+                <span className="hidden sm:inline max-w-[95px] truncate">{currentMemberName}</span>
+                <ChevronDown className="w-3.5 h-3.5 opacity-80" />
               </button>
 
               {isOnlineMenuOpen && (
-                <div className="absolute right-0 mt-2 w-72 rounded-xl bg-white border border-[#EDE4DA] shadow-xl p-3.5 z-50 text-xs text-[#231815] space-y-3 animate-in fade-in zoom-in-95 duration-100">
+                <div className="absolute right-0 mt-2 w-80 rounded-xl bg-white border border-[#EDE4DA] shadow-xl p-3.5 z-50 text-xs text-[#231815] space-y-3 animate-in fade-in zoom-in-95 duration-100">
                   <div className="flex items-center justify-between border-b border-[#EDE4DA] pb-2.5">
                     <div className="flex items-center gap-2">
-                      <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
+                      <span className={`w-2.5 h-2.5 rounded-full ${syncBadgeConfig.dot}`}></span>
                       <div>
-                        <p className="font-bold text-[#231815]">Sincronização em Tempo Real</p>
+                        <p className="font-bold text-[#231815]">
+                          Cloud Firestore: {syncBadgeConfig.label}
+                        </p>
                         <p className="text-[11px] text-[#73645B]">
-                          {onlineCount} {onlineCount === 1 ? 'janela conectada' : 'janelas conectadas agora'}
+                          {onlineCount}{' '}
+                          {onlineCount === 1
+                            ? 'computador/sessão online no grupo'
+                            : 'computadores/sessões online no grupo'}
                         </p>
                       </div>
                     </div>
@@ -234,7 +277,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                       <button
                         type="button"
                         onClick={handleManualSync}
-                        title="Forçar atualização imediata"
+                        title="Verificar conexão com o banco online"
                         className="p-1.5 rounded-lg border border-[#EDE4DA] hover:bg-[#FAF7F2] text-[#6A3102] cursor-pointer"
                       >
                         <RefreshCw className={`w-3.5 h-3.5 ${isSyncingNow ? 'animate-spin' : ''}`} />
@@ -242,19 +285,25 @@ export const Navbar: React.FC<NavbarProps> = ({
                     )}
                   </div>
 
+                  {presence?.syncErrorMessage && (
+                    <div className="p-2 rounded-lg bg-red-50 border border-red-200 text-red-800 text-[11px]">
+                      {presence.syncErrorMessage}
+                    </div>
+                  )}
+
                   {/* Select active team member identity for this browser */}
                   {onChangeMemberName && (
                     <div className="space-y-1.5">
                       <label className="block text-[11px] font-bold text-[#5C4D44] uppercase tracking-wider">
-                        Seu Perfil nesta Página:
+                        Integrante Ativo neste Computador:
                       </label>
-                      <div className="grid grid-cols-1 gap-1 max-h-40 overflow-y-auto pr-0.5">
+                      <div className="grid grid-cols-1 gap-1 max-h-48 overflow-y-auto pr-0.5">
                         {(teamMembers.length > 0
                           ? teamMembers
                           : [
-                              { id: 'member-bruno', name: 'Bruno', specialty: 'Designer de Feed', email: '', role: 'admin' as const },
-                              { id: 'member-ana', name: 'Ana', specialty: 'Social Media', email: '', role: 'member' as const },
-                              { id: 'member-carlos', name: 'Carlos', specialty: 'Editor de Vídeo', email: '', role: 'member' as const }
+                              { id: 'member-bruno', name: 'Bruno', specialty: 'Designer de Feed', email: 'bruno.english06@gmail.com', role: 'admin' as const },
+                              { id: 'member-ana', name: 'Ana', specialty: 'Social Media', email: 'ana.socialmedia@creative.com', role: 'member' as const },
+                              { id: 'member-carlos', name: 'Carlos', specialty: 'Editor de Vídeo', email: 'carlos.video@creative.com', role: 'member' as const }
                             ]
                         ).map((m) => {
                           const isSelected = m.name.toLowerCase() === currentMemberName.toLowerCase();
@@ -273,7 +322,12 @@ export const Navbar: React.FC<NavbarProps> = ({
                               }`}
                             >
                               <div className="truncate">
-                                <span className="block truncate">{m.name}</span>
+                                <span className="block truncate">
+                                  {m.name}{' '}
+                                  <span className="text-[10px] font-normal text-[#8C7A70]">
+                                    ({m.role === 'admin' ? 'Admin' : 'Membro'})
+                                  </span>
+                                </span>
                                 <span className="text-[10px] text-[#8C7A70] font-normal block truncate">
                                   {m.specialty}
                                 </span>
@@ -282,6 +336,29 @@ export const Navbar: React.FC<NavbarProps> = ({
                             </button>
                           );
                         })}
+
+                        {/* Option to test unauthorized visitor access (Requirement 6 / Test 6) */}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onChangeMemberName('Visitante Sem Permissão');
+                            setIsOnlineMenuOpen(false);
+                          }}
+                          className={`w-full px-2.5 py-1.5 rounded-lg text-left flex items-center justify-between transition-colors cursor-pointer border-t border-[#EDE4DA] mt-1 pt-2 ${
+                            currentMemberName === 'Visitante Sem Permissão'
+                              ? 'bg-red-50 text-red-800 font-bold border border-red-200'
+                              : 'hover:bg-red-50/50 text-[#73645B]'
+                          }`}
+                        >
+                          <div className="truncate">
+                            <span className="block truncate text-[11px]">
+                              Visitante Sem Permissão (Teste de Segurança)
+                            </span>
+                            <span className="text-[10px] text-[#8C7A70] font-normal block truncate">
+                              Simular usuário não autorizado no grupo
+                            </span>
+                          </div>
+                        </button>
                       </div>
                     </div>
                   )}
@@ -290,7 +367,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                   {presence && presence.onlineMembers.length > 0 && (
                     <div className="pt-2 border-t border-[#EDE4DA] space-y-1">
                       <span className="text-[10px] font-bold uppercase tracking-wider text-[#8C7A70] block">
-                        Ativos no momento:
+                        Conectados em Tempo Real:
                       </span>
                       <div className="flex flex-wrap gap-1.5">
                         {presence.onlineMembers.map((om) => (

@@ -2,40 +2,82 @@
   "entities": {
     "Task": {
       "title": "Task",
-      "description": "Creative production demand/task",
+      "description": "Creative production demand with deliverables, stages, subtasks, comments, and history",
       "type": "object",
       "properties": {
         "id": { "type": "string" },
         "title": { "type": "string" },
         "client": { "type": "string" },
+        "project": { "type": "string" },
         "groupId": { "type": "string" },
+        "type": { "type": "string" },
         "category": { "type": "string" },
         "specialty": { "type": "string" },
+        "assignee": { "type": "string" },
         "status": { "type": "string" },
-        "priority": { "type": "string" }
+        "priority": { "type": "string" },
+        "startDate": { "type": "string" },
+        "deadlineDate": { "type": "string" },
+        "deadlineTime": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" },
+        "updatedBy": { "type": "string" },
+        "version": { "type": "number" }
       },
       "required": ["id", "title", "client", "status"]
     },
     "WorkGroup": {
       "title": "WorkGroup",
-      "description": "Collaborative workgroup/team",
+      "description": "Collaborative workgroup with authorized team members and roles",
       "type": "object",
       "properties": {
         "id": { "type": "string" },
         "name": { "type": "string" },
-        "adminId": { "type": "string" }
+        "description": { "type": "string" },
+        "adminId": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
       },
       "required": ["id", "name", "adminId"]
+    },
+    "SystemDoc": {
+      "title": "SystemDoc",
+      "description": "System synchronization metadata and deletion tombstones",
+      "type": "object",
+      "properties": {
+        "updatedAt": { "type": "string" }
+      }
+    },
+    "PresenceDoc": {
+      "title": "PresenceDoc",
+      "description": "Real-time online presence of connected team members",
+      "type": "object",
+      "properties": {
+        "clientId": { "type": "string" },
+        "memberName": { "type": "string" },
+        "memberEmail": { "type": "string" },
+        "groupId": { "type": "string" },
+        "lastSeen": { "type": "number" }
+      },
+      "required": ["clientId", "memberName", "lastSeen"]
     }
   },
   "firestore": {
     "/workgroups/{groupId}": {
       "schema": "WorkGroup",
-      "description": "Collection of workgroups"
+      "description": "Collection of workgroups and their authorized members"
     },
     "/tasks/{taskId}": {
       "schema": "Task",
-      "description": "Collection of creative production demands"
+      "description": "Collection of shared creative production demands"
+    },
+    "/system/{docId}": {
+      "schema": "SystemDoc",
+      "description": "System tombstones and connection health probe"
+    },
+    "/presence/{clientId}": {
+      "schema": "PresenceDoc",
+      "description": "Real-time online presence across computers"
     }
   }
 }

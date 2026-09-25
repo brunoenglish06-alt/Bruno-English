@@ -1,14 +1,52 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128;
+    }
+
+    function isValidWorkgroup(data) {
+      return data.id is string &&
+             data.id.size() >= 1 &&
+             data.id.size() <= 128 &&
+             data.name is string &&
+             data.name.size() >= 1 &&
+             data.name.size() <= 200 &&
+             data.members is list &&
+             data.members.size() <= 200;
+    }
+
+    function isValidTask(data) {
+      return data.id is string &&
+             data.id.size() >= 1 &&
+             data.id.size() <= 128 &&
+             data.title is string &&
+             data.title.size() >= 1 &&
+             data.title.size() <= 500 &&
+             data.client is string &&
+             data.client.size() <= 300 &&
+             data.status is string &&
+             data.status.size() <= 64;
+    }
+
     match /workgroups/{groupId} {
-      allow read, write: if true;
+      allow read: if true;
+      allow create, update: if isValidId(groupId) && isValidWorkgroup(request.resource.data);
+      allow delete: if isValidId(groupId);
     }
+
     match /tasks/{taskId} {
-      allow read, write: if true;
+      allow read: if true;
+      allow create, update: if isValidId(taskId) && isValidTask(request.resource.data);
+      allow delete: if isValidId(taskId);
     }
+
     match /system/{docId} {
-      allow read, write: if true;
+      allow read, write: if isValidId(docId);
+    }
+
+    match /presence/{clientId} {
+      allow read, write: if isValidId(clientId);
     }
   }
 }
