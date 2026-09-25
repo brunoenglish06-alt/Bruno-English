@@ -7,13 +7,15 @@ import {
   Sparkles,
   Settings,
   Plus,
-  Calendar
+  Calendar,
+  Users,
+  FolderKanban
 } from 'lucide-react';
-import { RiskLevel } from '../types';
+import { RiskLevel, WorkGroup } from '../types';
 
 interface NavbarProps {
-  currentTab: 'dashboard' | 'today' | 'calendar' | 'approvals' | 'assistant';
-  onTabChange: (tab: 'dashboard' | 'today' | 'calendar' | 'approvals' | 'assistant') => void;
+  currentTab: 'dashboard' | 'today' | 'calendar' | 'approvals' | 'team' | 'assistant';
+  onTabChange: (tab: 'dashboard' | 'today' | 'calendar' | 'approvals' | 'team' | 'assistant') => void;
   onOpenNewTask: () => void;
   onOpenSettings: () => void;
   onOpenGoogleCalendar: () => void;
@@ -21,6 +23,8 @@ interface NavbarProps {
   overallRisk: RiskLevel;
   pendingApprovalsCount: number;
   todayTasksCount: number;
+  activeGroupName?: string;
+  teamMembersCount?: number;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -32,7 +36,9 @@ export const Navbar: React.FC<NavbarProps> = ({
   isGoogleConnected,
   overallRisk,
   pendingApprovalsCount,
-  todayTasksCount
+  todayTasksCount,
+  activeGroupName = 'Equipe de Design',
+  teamMembersCount = 3
 }) => {
   return (
     <header className="sticky top-0 z-30 bg-[#FFFFFF] border-b border-[#EDE4DA] shadow-[0_1px_3px_rgba(0,0,0,0.03)]">
@@ -42,7 +48,7 @@ export const Navbar: React.FC<NavbarProps> = ({
           <div className="flex items-center gap-3">
             <button
               onClick={() => onTabChange('dashboard')}
-              className="flex items-center gap-2.5 text-left group focus:outline-none"
+              className="flex items-center gap-2.5 text-left group focus:outline-none cursor-pointer"
             >
               <div className="w-9 h-9 rounded-lg bg-[#6A3102] flex items-center justify-center text-white font-bold text-lg shadow-sm group-hover:bg-[#542601] transition-colors">
                 P
@@ -62,7 +68,7 @@ export const Navbar: React.FC<NavbarProps> = ({
           <nav className="hidden md:flex items-center gap-1">
             <button
               onClick={() => onTabChange('dashboard')}
-              className={`px-3 py-2 rounded-md text-sm font-medium transition-colors flex items-center gap-2 ${
+              className={`px-3 py-2 rounded-md text-sm font-medium transition-colors flex items-center gap-1.5 cursor-pointer ${
                 currentTab === 'dashboard'
                   ? 'bg-[#F5EFE6] text-[#6A3102] font-semibold'
                   : 'text-[#5C4D44] hover:text-[#231815] hover:bg-[#FAF7F2]'
@@ -74,7 +80,7 @@ export const Navbar: React.FC<NavbarProps> = ({
 
             <button
               onClick={() => onTabChange('today')}
-              className={`px-3 py-2 rounded-md text-sm font-medium transition-colors flex items-center gap-2 ${
+              className={`px-3 py-2 rounded-md text-sm font-medium transition-colors flex items-center gap-1.5 cursor-pointer ${
                 currentTab === 'today'
                   ? 'bg-[#F5EFE6] text-[#6A3102] font-semibold'
                   : 'text-[#5C4D44] hover:text-[#231815] hover:bg-[#FAF7F2]'
@@ -91,7 +97,7 @@ export const Navbar: React.FC<NavbarProps> = ({
 
             <button
               onClick={() => onTabChange('calendar')}
-              className={`px-3 py-2 rounded-md text-sm font-medium transition-colors flex items-center gap-2 ${
+              className={`px-3 py-2 rounded-md text-sm font-medium transition-colors flex items-center gap-1.5 cursor-pointer ${
                 currentTab === 'calendar'
                   ? 'bg-[#F5EFE6] text-[#6A3102] font-semibold'
                   : 'text-[#5C4D44] hover:text-[#231815] hover:bg-[#FAF7F2]'
@@ -103,7 +109,7 @@ export const Navbar: React.FC<NavbarProps> = ({
 
             <button
               onClick={() => onTabChange('approvals')}
-              className={`px-3 py-2 rounded-md text-sm font-medium transition-colors flex items-center gap-2 ${
+              className={`px-3 py-2 rounded-md text-sm font-medium transition-colors flex items-center gap-1.5 cursor-pointer ${
                 currentTab === 'approvals'
                   ? 'bg-[#F5EFE6] text-[#6A3102] font-semibold'
                   : 'text-[#5C4D44] hover:text-[#231815] hover:bg-[#FAF7F2]'
@@ -118,9 +124,27 @@ export const Navbar: React.FC<NavbarProps> = ({
               )}
             </button>
 
+            {/* Nova Seção EQUIPE (Requested in requirement 5) */}
+            <button
+              onClick={() => onTabChange('team')}
+              className={`px-3 py-2 rounded-md text-sm font-medium transition-colors flex items-center gap-1.5 cursor-pointer ${
+                currentTab === 'team'
+                  ? 'bg-[#F5EFE6] text-[#6A3102] font-semibold'
+                  : 'text-[#5C4D44] hover:text-[#231815] hover:bg-[#FAF7F2]'
+              }`}
+            >
+              <Users className="w-4 h-4 text-[#6A3102]" />
+              <span>Equipe</span>
+              {teamMembersCount > 0 && (
+                <span className="ml-0.5 text-[11px] px-1.5 py-0.2 bg-[#EDE4DA] text-[#5C4D44] rounded-full font-mono">
+                  {teamMembersCount}
+                </span>
+              )}
+            </button>
+
             <button
               onClick={() => onTabChange('assistant')}
-              className={`px-3 py-2 rounded-md text-sm font-medium transition-colors flex items-center gap-2 ${
+              className={`px-3 py-2 rounded-md text-sm font-medium transition-colors flex items-center gap-1.5 cursor-pointer ${
                 currentTab === 'assistant'
                   ? 'bg-[#F5EFE6] text-[#6A3102] font-semibold'
                   : 'text-[#5C4D44] hover:text-[#231815] hover:bg-[#FAF7F2]'
@@ -159,7 +183,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             <button
               onClick={onOpenSettings}
               title="Configurações e Margem de Segurança"
-              className="p-2 text-[#73645B] hover:text-[#231815] hover:bg-[#FAF7F2] rounded-lg transition-colors border border-transparent hover:border-[#EDE4DA]"
+              className="p-2 text-[#73645B] hover:text-[#231815] hover:bg-[#FAF7F2] rounded-lg transition-colors border border-transparent hover:border-[#EDE4DA] cursor-pointer"
             >
               <Settings className="w-5 h-5" />
             </button>
@@ -176,7 +200,7 @@ export const Navbar: React.FC<NavbarProps> = ({
       </div>
 
       {/* Mobile navigation row */}
-      <div className="md:hidden flex items-center justify-around border-t border-[#EDE4DA] px-2 py-1.5 bg-[#FAF7F2]">
+      <div className="md:hidden flex items-center justify-around border-t border-[#EDE4DA] px-2 py-1.5 bg-[#FAF7F2] overflow-x-auto">
         <button
           onClick={() => onTabChange('dashboard')}
           className={`px-2 py-1 text-xs font-medium rounded ${
@@ -208,6 +232,14 @@ export const Navbar: React.FC<NavbarProps> = ({
           }`}
         >
           Aprovações ({pendingApprovalsCount})
+        </button>
+        <button
+          onClick={() => onTabChange('team')}
+          className={`px-2 py-1 text-xs font-medium rounded ${
+            currentTab === 'team' ? 'text-[#6A3102] font-bold' : 'text-[#73645B]'
+          }`}
+        >
+          Equipe
         </button>
         <button
           onClick={() => onTabChange('assistant')}

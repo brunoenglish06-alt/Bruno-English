@@ -1,0 +1,41 @@
+{
+  "entities": {
+    "Task": {
+      "title": "Task",
+      "description": "Creative production demand/task",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "client": { "type": "string" },
+        "groupId": { "type": "string" },
+        "category": { "type": "string" },
+        "specialty": { "type": "string" },
+        "status": { "type": "string" },
+        "priority": { "type": "string" }
+      },
+      "required": ["id", "title", "client", "status"]
+    },
+    "WorkGroup": {
+      "title": "WorkGroup",
+      "description": "Collaborative workgroup/team",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "adminId": { "type": "string" }
+      },
+      "required": ["id", "name", "adminId"]
+    }
+  },
+  "firestore": {
+    "/workgroups/{groupId}": {
+      "schema": "WorkGroup",
+      "description": "Collection of workgroups"
+    },
+    "/tasks/{taskId}": {
+      "schema": "Task",
+      "description": "Collection of creative production demands"
+    }
+  }
+}

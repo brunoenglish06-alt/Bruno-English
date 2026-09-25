@@ -350,36 +350,95 @@ export function generateProductionPlan(
       notes: 'Checagem de erros de digitação, grid, alinhamento e cortes.'
     });
 
-    // 7. PRODUÇÃO PRINCIPAL
-    // Placed before internal review
-    let productionDate = subtractWorkingDays(reviewDate, 1, settings.workDays);
-    if (productionDate < today) productionDate = today;
+    // 7. PRODUÇÃO: Se houver múltiplos entregáveis, agenda cada um individualmente!
+    if (taskDraft.deliverables && taskDraft.deliverables.length > 0) {
+      // Ordena entregáveis por prazo individual (se definido)
+      const sortedDeliverables = [...taskDraft.deliverables].sort((a, b) => {
+        const dateA = a.deadlineDate || deadlineDate;
+        const dateB = b.deadlineDate || deadlineDate;
+        return dateA.localeCompare(dateB);
+      });
 
-    const prodMinutes = Math.round(productionHours * 60);
-    const prodSlot = findFreeSlotOnDay(
-      productionDate,
-      prodMinutes,
-      settings,
-      existingTasks,
-      14 * 60, // 14:00
-      taskId
-    ) || {
-      startTime: '14:00',
-      endTime: minutesToTime(14 * 60 + prodMinutes)
-    };
+      // Distribuir as produções dos entregáveis antes da revisão
+      let lastProdDate = subtractWorkingDays(reviewDate, 1, settings.workDays);
+      if (lastProdDate < today) lastProdDate = today;
 
-    stages.push({
-      id: `${taskId}-production`,
-      taskId,
-      type: 'production',
-      title: `Produzir ${taskDraft.title || 'Demanda'}`,
-      date: productionDate,
-      startTime: prodSlot.startTime,
-      endTime: prodSlot.endTime,
-      durationMinutes: prodMinutes,
-      completed: false,
-      notes: `Foco total na criação (${productionHours}h estimadas).`
-    });
+      sortedDeliverables.forEach((deliv, idx) => {
+        // Se o entregável tem prazo individual mais próximo, respeita esse prazo
+        let targetProdDate = lastProdDate;
+        if (deliv.deadlineDate && deliv.deadlineDate < deadlineDate) {
+          const customSubDate = subtractWorkingDays(deliv.deadlineDate, 1, settings.workDays);
+          targetProdDate = customSubDate >= today ? customSubDate : today;
+        } else if (sortedDeliverables.length > 1) {
+          // Espalhar produções entre dias para evitar sobrecarga (se houver dias disponíveis)
+          const offsetDays = sortedDeliverables.length - 1 - idx;
+          const spreadDate = subtractWorkingDays(lastProdDate, offsetDays, settings.workDays);
+          if (spreadDate >= today) {
+            targetProdDate = spreadDate;
+          }
+        }
+
+        const prodMinutes = Math.round((deliv.estimatedHours || 1) * 60);
+        const preferredHour = 10 + (idx % 2) * 4; // Alterna 10h e 14h
+        const prodSlot = findFreeSlotOnDay(
+          targetProdDate,
+          prodMinutes,
+          settings,
+          existingTasks,
+          preferredHour * 60,
+          taskId
+        ) || {
+          startTime: `${preferredHour.toString().padStart(2, '0')}:00`,
+          endTime: minutesToTime(preferredHour * 60 + prodMinutes)
+        };
+
+        stages.push({
+          id: `${taskId}-prod-${deliv.id}`,
+          taskId,
+          deliverableId: deliv.id,
+          deliverableTitle: deliv.title,
+          assignee: deliv.assignee || taskDraft.assignee || 'Bruno',
+          type: 'production',
+          title: `Produzir ${deliv.title} (${deliv.specialty})`,
+          date: targetProdDate,
+          startTime: prodSlot.startTime,
+          endTime: prodSlot.endTime,
+          durationMinutes: prodMinutes,
+          completed: !!deliv.completed || deliv.status === 'delivered' || deliv.status === 'finalized',
+          notes: deliv.description || `Produção de ${deliv.title} (${deliv.estimatedHours}h estimadas). Responsável: ${deliv.assignee}.`
+        });
+      });
+    } else {
+      // Produção de demanda com item único
+      let productionDate = subtractWorkingDays(reviewDate, 1, settings.workDays);
+      if (productionDate < today) productionDate = today;
+
+      const prodMinutes = Math.round(productionHours * 60);
+      const prodSlot = findFreeSlotOnDay(
+        productionDate,
+        prodMinutes,
+        settings,
+        existingTasks,
+        14 * 60, // 14:00
+        taskId
+      ) || {
+        startTime: '14:00',
+        endTime: minutesToTime(14 * 60 + prodMinutes)
+      };
+
+      stages.push({
+        id: `${taskId}-production`,
+        taskId,
+        type: 'production',
+        title: `Produzir ${taskDraft.title || 'Demanda'}`,
+        date: productionDate,
+        startTime: prodSlot.startTime,
+        endTime: prodSlot.endTime,
+        durationMinutes: prodMinutes,
+        completed: false,
+        notes: `Foco total na criação (${productionHours}h estimadas).`
+      });
+    }
   } else {
     // Sem necessidade de aprovação externa
     // Revisão interna 1 dia antes da entrega
@@ -411,35 +470,90 @@ export function generateProductionPlan(
       notes: 'Revisão técnica antes da finalização.'
     });
 
-    // Produção
-    let productionDate = subtractWorkingDays(reviewDate, 1, settings.workDays);
-    if (productionDate < today) productionDate = today;
+    // Produção: Múltiplos entregáveis ou único
+    if (taskDraft.deliverables && taskDraft.deliverables.length > 0) {
+      const sortedDeliverables = [...taskDraft.deliverables].sort((a, b) => {
+        const dateA = a.deadlineDate || deadlineDate;
+        const dateB = b.deadlineDate || deadlineDate;
+        return dateA.localeCompare(dateB);
+      });
 
-    const prodMinutes = Math.round(productionHours * 60);
-    const prodSlot = findFreeSlotOnDay(
-      productionDate,
-      prodMinutes,
-      settings,
-      existingTasks,
-      14 * 60,
-      taskId
-    ) || {
-      startTime: '14:00',
-      endTime: minutesToTime(14 * 60 + prodMinutes)
-    };
+      let lastProdDate = subtractWorkingDays(reviewDate, 1, settings.workDays);
+      if (lastProdDate < today) lastProdDate = today;
 
-    stages.push({
-      id: `${taskId}-production`,
-      taskId,
-      type: 'production',
-      title: `Produzir ${taskDraft.title || 'Demanda'}`,
-      date: productionDate,
-      startTime: prodSlot.startTime,
-      endTime: prodSlot.endTime,
-      durationMinutes: prodMinutes,
-      completed: false,
-      notes: `Execução da demanda (${productionHours}h).`
-    });
+      sortedDeliverables.forEach((deliv, idx) => {
+        let targetProdDate = lastProdDate;
+        if (deliv.deadlineDate && deliv.deadlineDate < deadlineDate) {
+          const customSubDate = subtractWorkingDays(deliv.deadlineDate, 1, settings.workDays);
+          targetProdDate = customSubDate >= today ? customSubDate : today;
+        } else if (sortedDeliverables.length > 1) {
+          const offsetDays = sortedDeliverables.length - 1 - idx;
+          const spreadDate = subtractWorkingDays(lastProdDate, offsetDays, settings.workDays);
+          if (spreadDate >= today) {
+            targetProdDate = spreadDate;
+          }
+        }
+
+        const prodMinutes = Math.round((deliv.estimatedHours || 1) * 60);
+        const preferredHour = 10 + (idx % 2) * 4;
+        const prodSlot = findFreeSlotOnDay(
+          targetProdDate,
+          prodMinutes,
+          settings,
+          existingTasks,
+          preferredHour * 60,
+          taskId
+        ) || {
+          startTime: `${preferredHour.toString().padStart(2, '0')}:00`,
+          endTime: minutesToTime(preferredHour * 60 + prodMinutes)
+        };
+
+        stages.push({
+          id: `${taskId}-prod-${deliv.id}`,
+          taskId,
+          deliverableId: deliv.id,
+          deliverableTitle: deliv.title,
+          assignee: deliv.assignee || taskDraft.assignee || 'Bruno',
+          type: 'production',
+          title: `Produzir ${deliv.title} (${deliv.specialty})`,
+          date: targetProdDate,
+          startTime: prodSlot.startTime,
+          endTime: prodSlot.endTime,
+          durationMinutes: prodMinutes,
+          completed: !!deliv.completed || deliv.status === 'delivered' || deliv.status === 'finalized',
+          notes: deliv.description || `Produção de ${deliv.title} (${deliv.estimatedHours}h). Responsável: ${deliv.assignee}.`
+        });
+      });
+    } else {
+      let productionDate = subtractWorkingDays(reviewDate, 1, settings.workDays);
+      if (productionDate < today) productionDate = today;
+
+      const prodMinutes = Math.round(productionHours * 60);
+      const prodSlot = findFreeSlotOnDay(
+        productionDate,
+        prodMinutes,
+        settings,
+        existingTasks,
+        14 * 60,
+        taskId
+      ) || {
+        startTime: '14:00',
+        endTime: minutesToTime(14 * 60 + prodMinutes)
+      };
+
+      stages.push({
+        id: `${taskId}-production`,
+        taskId,
+        type: 'production',
+        title: `Produzir ${taskDraft.title || 'Demanda'}`,
+        date: productionDate,
+        startTime: prodSlot.startTime,
+        endTime: prodSlot.endTime,
+        durationMinutes: prodMinutes,
+        completed: false,
+        notes: `Execução da demanda (${productionHours}h).`
+      });
+    }
   }
 
   // Sort stages chronologically (Date + Start Time)

@@ -275,8 +275,14 @@ export const TodayPlanner: React.FC<TodayPlannerProps> = ({
                       <p className="text-xs text-[#73645B] mt-0.5">{stage.notes}</p>
                     )}
 
-                    <div className="mt-2 flex items-center gap-3 text-[11px] text-[#8C7A70]">
+                    <div className="mt-2 flex items-center gap-3 text-[11px] text-[#8C7A70] flex-wrap">
                       <span>Duração: {formatHours(stage.durationMinutes / 60)}</span>
+                      {stage.assignee && (
+                        <>
+                          <span>·</span>
+                          <span className="text-[#6A3102] font-semibold">Responsável: {stage.assignee}</span>
+                        </>
+                      )}
                       <span>·</span>
                       <span>
                         Entrega da demanda:{' '}

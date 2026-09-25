@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import {
   Clock,
   AlertTriangle,
@@ -15,9 +15,17 @@ import {
   Eye,
   Check,
   ChevronRight,
-  Sparkles
+  Sparkles,
+  User,
+  Users,
+  FolderKanban,
+  Flame,
+  CheckSquare,
+  AlertCircle,
+  Package,
+  Layers
 } from 'lucide-react';
-import { Task, TaskStatus, Priority, RiskLevel, UserSettings } from '../types';
+import { Task, TaskStatus, Priority, RiskLevel, UserSettings, WorkGroup, Deliverable } from '../types';
 import {
   getTodayISO,
   formatReadableDate,
@@ -28,9 +36,11 @@ import {
 import {
   TASK_STATUS_CONFIG,
   PRIORITY_CONFIG,
-  RISK_LEVEL_CONFIG,
-  TASK_TYPE_CONFIG
+  RISK_LEVEL_CONFIG
 } from '../utils/statusConfig';
+import { findSpecialty, getCategories } from '../data/categoriesData';
+import { loadCachedWorkgroups, getActiveGroupId } from '../services/firestoreService';
+import { calculateDeliverablesProgress, getAllTaskAssignees } from '../utils/deliverableUtils';
 
 interface DashboardProps {
   tasks: Task[];
@@ -41,8 +51,11 @@ interface DashboardProps {
   onOpenReschedule: (task: Task) => void;
   onUpdateStatus: (taskId: string, newStatus: TaskStatus) => void;
   onToggleStageCompleted: (taskId: string, stageId: string) => void;
+  onUpdateTaskDeliverables?: (taskId: string, deliverables: Deliverable[]) => void;
   onNavigateToToday: () => void;
   onNavigateToApprovals: () => void;
+  onNavigateToTeam?: () => void;
+  initialMemberFilter?: string;
 }
 
 export const Dashboard: React.FC<DashboardProps> = ({
@@ -54,386 +67,386 @@ export const Dashboard: React.FC<DashboardProps> = ({
   onOpenReschedule,
   onUpdateStatus,
   onToggleStageCompleted,
+  onUpdateTaskDeliverables,
   onNavigateToToday,
-  onNavigateToApprovals
+  onNavigateToApprovals,
+  onNavigateToTeam,
+  initialMemberFilter = 'all'
 }) => {
   const today = getTodayISO();
+  const workgroups = loadCachedWorkgroups();
+  const activeGroupId = getActiveGroupId();
+  const activeGroup = workgroups.find((g) => g.id === activeGroupId) || workgroups[0];
 
   // Search and filter states
   const [searchTerm, setSearchTerm] = useState('');
-  const [statusFilter, setStatusFilter] = useState<string>('all');
+  const [activeTabFilter, setActiveTabFilter] = useState<
+    'all' | 'in_production' | 'awaiting_approval' | 'overdue' | 'completed'
+  >('all');
+  const [memberFilter, setMemberFilter] = useState<string>(initialMemberFilter);
+  const [categoryFilter, setCategoryFilter] = useState<string>('all');
   const [priorityFilter, setPriorityFilter] = useState<string>('all');
 
-  // KPI calculations
-  const totalTasks = tasks.length;
-  const completedTasks = tasks.filter((t) => t.status === 'delivered' || t.status === 'finalized');
-  const activeTasks = tasks.filter((t) => t.status !== 'delivered' && t.status !== 'finalized');
+  // View mode: 'demands' (demandas principais) vs 'deliverables' (entregáveis individuais)
+  const [viewMode, setViewMode] = useState<'demands' | 'deliverables'>('demands');
 
-  // Tasks for today (stages scheduled for today)
-  const tasksForToday = tasks.filter((t) =>
-    t.stages.some((s) => s.date === today && !s.completed)
+  // KPI Calculations
+  const activeTasks = useMemo(
+    () => tasks.filter((t) => t.status !== 'delivered' && t.status !== 'finalized'),
+    [tasks]
+  );
+  const completedTasks = useMemo(
+    () => tasks.filter((t) => t.status === 'delivered' || t.status === 'finalized'),
+    [tasks]
   );
 
-  // Overdue tasks
-  const overdueTasks = activeTasks.filter((t) => getDiffInDays(today, t.deadlineDate) < 0);
+  // 1. Tarefas de hoje (Tarefas com etapas marcadas para hoje OU com prazo hoje)
+  const todayTasks = useMemo(() => {
+    return tasks.filter((t) => {
+      if (t.status === 'delivered' || t.status === 'finalized') return false;
+      const hasStageToday = t.stages.some((s) => s.date === today && !s.completed);
+      const isDueToday = t.deadlineDate === today;
+      const hasDeliverableToday = t.deliverables?.some(
+        (d) => d.deadlineDate === today && !d.completed && d.status !== 'delivered' && d.status !== 'finalized'
+      );
+      return hasStageToday || isDueToday || hasDeliverableToday;
+    });
+  }, [tasks, today]);
 
-  // In production
-  const inProductionTasks = activeTasks.filter(
-    (t) => t.status === 'in_production' || t.status === 'in_review'
+  // 2. Demandas em produção
+  const inProductionTasks = useMemo(
+    () => activeTasks.filter((t) => t.status === 'in_production' || t.status === 'in_review' || t.status === 'in_adjustments'),
+    [activeTasks]
   );
 
-  // Awaiting approval
-  const awaitingApprovalTasks = activeTasks.filter(
-    (t) => t.status === 'awaiting_approval' || t.status === 'sent_for_approval'
+  // 3. Demandas aguardando aprovação
+  const awaitingApprovalTasks = useMemo(
+    () => activeTasks.filter((t) => t.status === 'awaiting_approval' || t.status === 'sent_for_approval'),
+    [activeTasks]
   );
 
-  // Near deadlines (next 3 days)
-  const nearDeadlineTasks = activeTasks.filter((t) => {
-    const diff = getDiffInDays(today, t.deadlineDate);
-    return diff >= 0 && diff <= 3;
-  });
+  // 4. Próximos prazos (próximos 3 dias)
+  const upcomingDeadlinesTasks = useMemo(() => {
+    return activeTasks.filter((t) => {
+      const diff = getDiffInDays(today, t.deadlineDate);
+      return diff >= 0 && diff <= 3;
+    });
+  }, [activeTasks, today]);
 
-  // On-time completion rate
-  const onTimeDelivered = completedTasks.filter((t) => {
-    if (!t.deliveredAt) return true;
-    const deliveredDay = t.deliveredAt.split('T')[0];
-    return deliveredDay <= t.deadlineDate;
-  }).length;
-  const onTimeRate = completedTasks.length > 0
-    ? Math.round((onTimeDelivered / completedTasks.length) * 100)
-    : 100;
+  // 5. Tarefas atrasadas
+  const overdueTasks = useMemo(() => {
+    return activeTasks.filter((t) => getDiffInDays(today, t.deadlineDate) < 0);
+  }, [activeTasks, today]);
 
-  // Next crucial deadline
-  const sortedUpcoming = [...activeTasks].sort((a, b) => a.deadlineDate.localeCompare(b.deadlineDate));
-  const nextCrucial = sortedUpcoming[0];
+  // Next crucial task
+  const nextCrucial = useMemo(() => {
+    const sorted = [...activeTasks].sort((a, b) => a.deadlineDate.localeCompare(b.deadlineDate));
+    return sorted[0];
+  }, [activeTasks]);
 
-  // Global Risk Assessment text
-  const riskConfig = RISK_LEVEL_CONFIG[overallRisk];
-  const riskDiagnoses = {
-    low: 'Carga balanceada. Prazos seguros e margens de produção preservadas.',
-    medium: 'Atenção aos prazos da semana. Mantenha os inícios recomendados para não consumir as folgas.',
-    high: 'Risco de atraso detectado em demandas prioritárias! Inicie a produção hoje.',
-    critical: 'Alerta crítico: tarefas atrasadas ou sobreposição severa de entregas. Replanejamento emergencial necessário.'
-  };
+  // Filtered task list
+  const filteredTasks = useMemo(() => {
+    return tasks.filter((task) => {
+      // Tab filter
+      if (activeTabFilter === 'in_production') {
+        if (task.status !== 'in_production' && task.status !== 'in_review' && task.status !== 'in_adjustments')
+          return false;
+      } else if (activeTabFilter === 'awaiting_approval') {
+        if (task.status !== 'awaiting_approval' && task.status !== 'sent_for_approval') return false;
+      } else if (activeTabFilter === 'overdue') {
+        const isOverdue = getDiffInDays(today, task.deadlineDate) < 0 && task.status !== 'delivered' && task.status !== 'finalized';
+        if (!isOverdue) return false;
+      } else if (activeTabFilter === 'completed') {
+        if (task.status !== 'delivered' && task.status !== 'finalized') return false;
+      }
 
-  // Filtered task list (deduplicated by task.id)
-  const filteredTasks = React.useMemo(() => {
-    const list = tasks.filter((t) => {
-      if (statusFilter !== 'all' && t.status !== statusFilter) return false;
-      if (priorityFilter !== 'all' && t.priority !== priorityFilter) return false;
+      // Member filter (Checks main assignee, collaborator or any deliverable assignee)
+      if (memberFilter !== 'all') {
+        const qMember = memberFilter.toLowerCase();
+        const matchesMain = task.assignee.toLowerCase().includes(qMember);
+        const matchesCollab = task.collaborators?.some((c) => c.toLowerCase().includes(qMember));
+        const matchesDeliv = task.deliverables?.some((d) => d.assignee.toLowerCase().includes(qMember));
+        if (!matchesMain && !matchesCollab && !matchesDeliv) return false;
+      }
+
+      // Category filter
+      if (categoryFilter !== 'all') {
+        if (task.category !== categoryFilter && task.type !== categoryFilter) return false;
+      }
+
+      // Priority filter
+      if (priorityFilter !== 'all' && task.priority !== priorityFilter) {
+        return false;
+      }
+
+      // Search term
       if (searchTerm.trim()) {
         const q = searchTerm.toLowerCase();
-        return (
-          t.title.toLowerCase().includes(q) ||
-          t.client.toLowerCase().includes(q) ||
-          t.type.toLowerCase().includes(q)
+        const matchesTitle = task.title.toLowerCase().includes(q);
+        const matchesClient = task.client.toLowerCase().includes(q);
+        const matchesProject = task.project?.toLowerCase().includes(q);
+        const matchesSpecialty = task.specialty?.toLowerCase().includes(q);
+        const matchesAssignee = task.assignee.toLowerCase().includes(q);
+        const matchesDeliverable = task.deliverables?.some(
+          (d) =>
+            d.title.toLowerCase().includes(q) ||
+            d.specialty.toLowerCase().includes(q) ||
+            d.assignee.toLowerCase().includes(q)
         );
+        if (!matchesTitle && !matchesClient && !matchesProject && !matchesSpecialty && !matchesAssignee && !matchesDeliverable) {
+          return false;
+        }
       }
+
       return true;
     });
+  }, [tasks, activeTabFilter, memberFilter, categoryFilter, priorityFilter, searchTerm, today]);
 
-    const seen = new Set<string>();
-    const unique: Task[] = [];
-    for (const item of list) {
-      if (item && item.id && !seen.has(item.id)) {
-        seen.add(item.id);
-        unique.push(item);
+  // Flattened deliverables for individual deliverable view
+  const individualDeliverables = useMemo(() => {
+    const list: Array<{ deliverable: Deliverable; parentTask: Task }> = [];
+    for (const t of filteredTasks) {
+      if (t.deliverables && t.deliverables.length > 0) {
+        for (const d of t.deliverables) {
+          // If member filter is active, only show deliverable for that member
+          if (memberFilter !== 'all') {
+            if (!d.assignee.toLowerCase().includes(memberFilter.toLowerCase())) continue;
+          }
+          list.push({ deliverable: d, parentTask: t });
+        }
       }
     }
-    return unique;
-  }, [tasks, statusFilter, priorityFilter, searchTerm]);
+    return list;
+  }, [filteredTasks, memberFilter]);
+
+  // Total deliverables across all tasks
+  const totalDeliverablesCount = useMemo(() => {
+    return tasks.reduce((acc, t) => acc + (t.deliverables?.length || 0), 0);
+  }, [tasks]);
+
+  // Helper to extract next action from stages or deliverables
+  const getNextAction = (task: Task) => {
+    const uncompleted = task.stages.find((s) => !s.completed);
+    if (!uncompleted) {
+      return task.status === 'delivered' || task.status === 'finalized'
+        ? 'Demanda concluída'
+        : 'Revisão final / Pronta para entrega';
+    }
+    return `${uncompleted.title} (${uncompleted.startTime || '09:00'})`;
+  };
+
+  // Toggle deliverable completed from dashboard
+  const handleToggleDeliverable = (parentTask: Task, delivId: string) => {
+    if (!parentTask.deliverables || !onUpdateTaskDeliverables) return;
+    const updated = parentTask.deliverables.map((d) => {
+      if (d.id !== delivId) return d;
+      const isDone = !d.completed;
+      return {
+        ...d,
+        completed: isDone,
+        status: isDone ? ('finalized' as TaskStatus) : ('todo' as TaskStatus)
+      };
+    });
+    onUpdateTaskDeliverables(parentTask.id, updated);
+  };
+
+  const categories = getCategories();
 
   return (
     <div className="space-y-6 text-[#231815]">
-      {/* 1. Header & Quick Action */}
+      {/* 1. Header & Quick Actions */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold font-display text-[#231815] tracking-tight">
-            Painel de Produção Criativa
+          <h1 className="text-xl sm:text-2xl font-bold font-display text-[#231815] tracking-tight">
+            Dashboard de Produção
           </h1>
           <p className="text-xs text-[#73645B] mt-0.5">
-            Planejamento regressivo e controle preventivo de entregas para designers e criadores.
+            Visão clara do que fazer hoje, prazos, entregáveis e responsabilidades da equipe
           </p>
         </div>
 
-        <div className="flex items-center gap-2.5">
-          <button
-            onClick={onNavigateToToday}
-            className="px-3.5 py-2 text-xs font-semibold rounded-lg border border-[#EDE4DA] bg-white hover:bg-[#FAF7F2] text-[#231815] shadow-xs flex items-center gap-1.5 transition-colors cursor-pointer"
-          >
-            <Clock className="w-3.5 h-3.5 text-[#6A3102]" />
-            <span>Ver Foco de Hoje</span>
-          </button>
+        <div className="flex items-center gap-2 self-start sm:self-auto">
+          {onNavigateToTeam && (
+            <button
+              onClick={onNavigateToTeam}
+              className="px-3.5 py-2 text-xs font-semibold rounded-lg bg-white border border-[#EDE4DA] hover:bg-[#FAF7F2] text-[#231815] shadow-2xs flex items-center gap-1.5 transition-colors cursor-pointer"
+            >
+              <Users className="w-3.5 h-3.5 text-[#6A3102]" />
+              <span>Ver Equipe ({activeGroup?.members.length || 1})</span>
+            </button>
+          )}
 
           <button
             onClick={onOpenNewTask}
             className="px-4 py-2 text-xs font-semibold rounded-lg bg-[#6A3102] hover:bg-[#542601] text-white shadow-xs flex items-center gap-1.5 transition-colors cursor-pointer"
           >
             <Plus className="w-4 h-4" />
-            <span>Cadastrar Demanda</span>
+            <span>Nova Demanda</span>
           </button>
         </div>
       </div>
 
-      {/* 2. Primary Risk Gauge Banner */}
-      <div className="bg-white p-5 rounded-2xl border border-[#EDE4DA] shadow-xs">
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-          <div className="space-y-1">
-            <div className="flex items-center gap-2">
-              <span className="text-xs font-bold text-[#8C7A70] uppercase tracking-wider">
-                Termômetro de Risco do Cronograma:
-              </span>
-              <span
-                className={`text-xs font-bold px-2.5 py-0.5 rounded-full ${riskConfig.bg} ${riskConfig.text} border ${riskConfig.border}`}
-              >
-                {riskConfig.label.toUpperCase()}
-              </span>
-            </div>
-            <p className="text-sm font-semibold text-[#231815] max-w-2xl leading-relaxed">
-              {tasks.length === 0
-                ? 'Pronto para iniciar. Cadastre sua primeira demanda para calcular o cronograma inteligente e a margem de segurança.'
-                : riskDiagnoses[overallRisk]}
-            </p>
-          </div>
-
-          <div className="w-full md:w-64 space-y-1.5">
-            <div className="flex justify-between text-[11px] font-mono text-[#8C7A70]">
-              <span>Segurança</span>
-              <span>Crítico</span>
-            </div>
-            <div className="h-2.5 w-full bg-[#EAE2D8] rounded-full overflow-hidden flex">
-              <div
-                className={`h-full transition-all duration-500 rounded-full ${
-                  overallRisk === 'low'
-                    ? 'w-1/4 bg-emerald-500'
-                    : overallRisk === 'medium'
-                    ? 'w-2/4 bg-amber-500'
-                    : overallRisk === 'high'
-                    ? 'w-3/4 bg-orange-500'
-                    : 'w-full bg-red-600 animate-pulse'
-                }`}
-              />
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* 3. Metrics Grid (Requested items) */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3">
-        {/* Tarefas Hoje */}
+      {/* 2. Top Summary Metrics Cards (Requested: Resumo do Dashboard) */}
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 sm:gap-4">
+        {/* Card 1: Tarefas de Hoje */}
         <div
           onClick={onNavigateToToday}
-          className="p-3.5 rounded-xl bg-white border border-[#EDE4DA] hover:border-[#6A3102] transition-colors cursor-pointer shadow-xs"
+          className="bg-white p-4 rounded-xl border border-[#EDE4DA] hover:border-[#6A3102]/50 transition-all cursor-pointer shadow-xs flex flex-col justify-between"
         >
-          <span className="text-[11px] font-medium text-[#8C7A70] block truncate">
-            Tarefas p/ Hoje
-          </span>
-          <span className="text-xl font-bold font-mono text-[#6A3102] block mt-0.5">
-            {tasksForToday.length}
-          </span>
-          <span className="text-[10px] text-[#8C7A70] flex items-center gap-1 mt-1">
-            <span>Ver agenda</span>
-            <ChevronRight className="w-3 h-3" />
-          </span>
+          <div className="flex items-center justify-between text-[#8C7A70] mb-2">
+            <span className="text-[11px] font-bold uppercase tracking-wider">Minha Produção Hoje</span>
+            <div className="w-6 h-6 rounded-md bg-[#6A3102]/10 text-[#6A3102] flex items-center justify-center">
+              <Clock className="w-3.5 h-3.5" />
+            </div>
+          </div>
+          <div>
+            <span className="text-2xl font-bold font-mono text-[#231815]">{todayTasks.length}</span>
+            <span className="text-[11px] text-[#73645B] block mt-0.5">demanda(s) ativas hoje</span>
+          </div>
         </div>
 
-        {/* Tarefas Atrasadas */}
+        {/* Card 2: Em Produção */}
         <div
-          className={`p-3.5 rounded-xl border transition-colors shadow-xs ${
-            overdueTasks.length > 0
-              ? 'bg-red-50/70 border-red-200 text-red-900'
-              : 'bg-white border-[#EDE4DA]'
-          }`}
+          onClick={() => setActiveTabFilter('in_production')}
+          className="bg-white p-4 rounded-xl border border-[#EDE4DA] hover:border-[#6A3102]/50 transition-all cursor-pointer shadow-xs flex flex-col justify-between"
         >
-          <span className="text-[11px] font-medium text-[#8C7A70] block truncate">
-            Atrasadas
-          </span>
-          <span
-            className={`text-xl font-bold font-mono block mt-0.5 ${
-              overdueTasks.length > 0 ? 'text-red-700' : 'text-[#231815]'
-            }`}
-          >
-            {overdueTasks.length}
-          </span>
-          <span className="text-[10px] text-[#8C7A70] block mt-1">
-            {overdueTasks.length > 0 ? 'Ação imediata' : 'Nenhuma atrasada'}
-          </span>
+          <div className="flex items-center justify-between text-[#8C7A70] mb-2">
+            <span className="text-[11px] font-bold uppercase tracking-wider">Em Produção</span>
+            <div className="w-6 h-6 rounded-md bg-blue-100 text-blue-800 flex items-center justify-center">
+              <Play className="w-3.5 h-3.5" />
+            </div>
+          </div>
+          <div>
+            <span className="text-2xl font-bold font-mono text-[#231815]">
+              {inProductionTasks.length}
+            </span>
+            <span className="text-[11px] text-[#73645B] block mt-0.5">em criação ou revisão</span>
+          </div>
         </div>
 
-        {/* Próximos Prazos */}
-        <div className="p-3.5 rounded-xl bg-white border border-[#EDE4DA] shadow-xs">
-          <span className="text-[11px] font-medium text-[#8C7A70] block truncate">
-            Prazos em 3d
-          </span>
-          <span className="text-xl font-bold font-mono text-[#231815] block mt-0.5">
-            {nearDeadlineTasks.length}
-          </span>
-          <span className="text-[10px] text-[#8C7A70] block mt-1">Próximos dias</span>
-        </div>
-
-        {/* Aguardando Aprovação */}
+        {/* Card 3: Aguardando Aprovação */}
         <div
           onClick={onNavigateToApprovals}
-          className="p-3.5 rounded-xl bg-white border border-[#EDE4DA] hover:border-amber-400 transition-colors cursor-pointer shadow-xs"
+          className="bg-white p-4 rounded-xl border border-[#EDE4DA] hover:border-[#6A3102]/50 transition-all cursor-pointer shadow-xs flex flex-col justify-between"
         >
-          <span className="text-[11px] font-medium text-[#8C7A70] block truncate">
-            Em Aprovação
-          </span>
-          <span className="text-xl font-bold font-mono text-amber-700 block mt-0.5">
-            {awaitingApprovalTasks.length}
-          </span>
-          <span className="text-[10px] text-[#8C7A70] flex items-center gap-1 mt-1">
-            <span>Com clientes</span>
-            <ChevronRight className="w-3 h-3" />
-          </span>
+          <div className="flex items-center justify-between text-[#8C7A70] mb-2">
+            <span className="text-[11px] font-bold uppercase tracking-wider">Aguardando Aprovação</span>
+            <div className="w-6 h-6 rounded-md bg-amber-100 text-amber-900 flex items-center justify-center">
+              <AlertCircle className="w-3.5 h-3.5" />
+            </div>
+          </div>
+          <div>
+            <span className="text-2xl font-bold font-mono text-amber-900">
+              {awaitingApprovalTasks.length}
+            </span>
+            <span className="text-[11px] text-[#73645B] block mt-0.5">com clientes ou gestor</span>
+          </div>
         </div>
 
-        {/* Em Produção */}
-        <div className="p-3.5 rounded-xl bg-white border border-[#EDE4DA] shadow-xs">
-          <span className="text-[11px] font-medium text-[#8C7A70] block truncate">
-            Em Produção
-          </span>
-          <span className="text-xl font-bold font-mono text-blue-700 block mt-0.5">
-            {inProductionTasks.length}
-          </span>
-          <span className="text-[10px] text-[#8C7A70] block mt-1">Na esteira</span>
+        {/* Card 4: Próximos Prazos */}
+        <div
+          onClick={() => setActiveTabFilter('all')}
+          className="bg-white p-4 rounded-xl border border-[#EDE4DA] hover:border-[#6A3102]/50 transition-all cursor-pointer shadow-xs flex flex-col justify-between"
+        >
+          <div className="flex items-center justify-between text-[#8C7A70] mb-2">
+            <span className="text-[11px] font-bold uppercase tracking-wider">Próximos Prazos</span>
+            <div className="w-6 h-6 rounded-md bg-purple-100 text-purple-900 flex items-center justify-center">
+              <Calendar className="w-3.5 h-3.5" />
+            </div>
+          </div>
+          <div>
+            <span className="text-2xl font-bold font-mono text-[#231815]">
+              {upcomingDeadlinesTasks.length}
+            </span>
+            <span className="text-[11px] text-[#73645B] block mt-0.5">vencem nos próx. 3 dias</span>
+          </div>
         </div>
 
-        {/* Concluídas */}
-        <div className="p-3.5 rounded-xl bg-white border border-[#EDE4DA] shadow-xs">
-          <span className="text-[11px] font-medium text-[#8C7A70] block truncate">
-            Concluídas
-          </span>
-          <span className="text-xl font-bold font-mono text-emerald-700 block mt-0.5">
-            {completedTasks.length}
-          </span>
-          <span className="text-[10px] text-[#8C7A70] block mt-1">Entregues</span>
-        </div>
-
-        {/* % no Prazo */}
-        <div className="p-3.5 rounded-xl bg-white border border-[#EDE4DA] shadow-xs">
-          <span className="text-[11px] font-medium text-[#8C7A70] block truncate">
-            % no Prazo
-          </span>
-          <span className="text-xl font-bold font-mono text-emerald-800 block mt-0.5">
-            {onTimeRate}%
-          </span>
-          <span className="text-[10px] text-[#8C7A70] block mt-1">Pontualidade</span>
-        </div>
-
-        {/* Próximo Prazo Importante */}
-        <div className="p-3.5 rounded-xl bg-[#FAF7F2] border border-[#EDE4DA] shadow-xs">
-          <span className="text-[11px] font-medium text-[#8C7A70] block truncate">
-            Próx. Entrega
-          </span>
-          <span className="text-xs font-bold font-mono text-[#231815] block mt-0.5 truncate">
-            {nextCrucial ? nextCrucial.client : '—'}
-          </span>
-          <span className="text-[10px] font-mono text-[#6A3102] block mt-1">
-            {nextCrucial ? formatReadableDate(nextCrucial.deadlineDate, false) : 'Livre'}
-          </span>
-        </div>
-      </div>
-
-      {/* 4. Filter & Search Controls */}
-      <div className="bg-white p-4 rounded-xl border border-[#EDE4DA] flex flex-wrap items-center justify-between gap-3 shadow-xs">
-        <div className="relative flex-1 min-w-[220px]">
-          <Search className="w-4 h-4 text-[#8C7A70] absolute left-3 top-2.5" />
-          <input
-            type="text"
-            placeholder="Buscar por cliente, título ou formato..."
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            className="w-full pl-9 pr-4 py-2 text-xs border border-[#EDE4DA] rounded-lg bg-[#FAF7F2] focus:bg-white focus:outline-none focus:ring-1 focus:ring-[#6A3102] text-[#231815]"
-          />
-        </div>
-
-        <div className="flex items-center gap-2 flex-wrap text-xs">
-          <select
-            value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value)}
-            className="border border-[#EDE4DA] rounded-lg px-2.5 py-2 bg-[#FAF7F2] text-[#231815] font-medium"
-          >
-            <option value="all">Todos os Status</option>
-            {Object.entries(TASK_STATUS_CONFIG).map(([k, v]) => (
-              <option key={k} value={k}>
-                {v.label}
-              </option>
-            ))}
-          </select>
-
-          <select
-            value={priorityFilter}
-            onChange={(e) => setPriorityFilter(e.target.value)}
-            className="border border-[#EDE4DA] rounded-lg px-2.5 py-2 bg-[#FAF7F2] text-[#231815] font-medium"
-          >
-            <option value="all">Todas Prioridades</option>
-            <option value="urgent">Urgente</option>
-            <option value="high">Alta</option>
-            <option value="normal">Normal</option>
-            <option value="low">Baixa</option>
-          </select>
+        {/* Card 5: Tarefas Atrasadas */}
+        <div
+          onClick={() => setActiveTabFilter('overdue')}
+          className={`bg-white p-4 rounded-xl border transition-all cursor-pointer shadow-xs flex flex-col justify-between ${
+            overdueTasks.length > 0 ? 'border-red-300 bg-red-50/20' : 'border-[#EDE4DA]'
+          }`}
+        >
+          <div className="flex items-center justify-between text-[#8C7A70] mb-2">
+            <span className="text-[11px] font-bold uppercase tracking-wider text-red-700">
+              Tarefas Atrasadas
+            </span>
+            <div className="w-6 h-6 rounded-md bg-red-100 text-red-800 flex items-center justify-center">
+              <AlertTriangle className="w-3.5 h-3.5" />
+            </div>
+          </div>
+          <div>
+            <span
+              className={`text-2xl font-bold font-mono ${
+                overdueTasks.length > 0 ? 'text-red-700' : 'text-[#231815]'
+              }`}
+            >
+              {overdueTasks.length}
+            </span>
+            <span className="text-[11px] text-[#73645B] block mt-0.5">
+              {overdueTasks.length > 0 ? 'necessitam replanejamento' : 'nenhum atraso!'}
+            </span>
+          </div>
         </div>
       </div>
 
-      {/* 5. Main Task Cards Grid */}
-      <div className="space-y-3">
-        <div className="flex items-center justify-between px-1">
-          <span className="text-xs font-bold text-[#5C4D44] uppercase tracking-wider">
-            Todas as Demandas Cadastradas ({filteredTasks.length})
-          </span>
-          <span className="text-[11px] text-[#8C7A70]">
-            Clique no card para abrir o cronograma detalhado
-          </span>
+      {/* 3. ÁREA DESTAQUE: "MINHA PRODUÇÃO DE HOJE" (Requested in prompt) */}
+      <div className="bg-white rounded-2xl border border-[#EDE4DA] p-5 shadow-xs space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-[#EDE4DA] pb-3">
+          <div className="flex items-center gap-2">
+            <div className="w-7 h-7 rounded-lg bg-[#6A3102]/10 text-[#6A3102] flex items-center justify-center">
+              <Flame className="w-4 h-4" />
+            </div>
+            <div>
+              <h2 className="text-sm font-bold uppercase tracking-wider text-[#231815]">
+                MINHA PRODUÇÃO DE HOJE
+              </h2>
+              <span className="text-xs text-[#73645B]">
+                {formatReadableDate(today, true)} · {todayTasks.length} demanda(s) em foco
+              </span>
+            </div>
+          </div>
+
+          <button
+            onClick={onNavigateToToday}
+            className="text-xs font-semibold text-[#6A3102] hover:underline flex items-center gap-1 self-start sm:self-auto cursor-pointer"
+          >
+            <span>Abrir Cronograma do Dia</span>
+            <ArrowRight className="w-3.5 h-3.5" />
+          </button>
         </div>
 
-        {filteredTasks.length === 0 ? (
-          <div className="bg-white p-12 rounded-xl border border-[#EDE4DA] text-center">
-            {tasks.length === 0 ? (
-              <div className="max-w-md mx-auto space-y-3">
-                <div className="w-12 h-12 rounded-xl bg-[#6A3102]/10 text-[#6A3102] flex items-center justify-center mx-auto">
-                  <Plus className="w-6 h-6" />
-                </div>
-                <h3 className="text-base font-bold text-[#231815]">Nenhuma demanda cadastrada</h3>
-                <p className="text-xs text-[#73645B] leading-relaxed">
-                  O seu painel está limpo e pronto para produção! Cadastre uma nova demanda para o sistema calcular automaticamente a linha do tempo, etapas de criação e margens de entrega.
-                </p>
-                <div className="pt-2">
-                  <button
-                    onClick={onOpenNewTask}
-                    className="px-4 py-2.5 text-xs font-semibold rounded-lg bg-[#6A3102] hover:bg-[#542601] text-white shadow-xs inline-flex items-center gap-2 transition-colors cursor-pointer"
-                  >
-                    <Plus className="w-4 h-4" />
-                    <span>Cadastrar Primeira Demanda</span>
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <p className="text-xs text-[#8C7A70]">Nenhuma demanda encontrada com estes filtros.</p>
-            )}
+        {todayTasks.length === 0 ? (
+          <div className="p-8 text-center bg-[#FAF7F2]/60 rounded-xl border border-dashed border-[#EDE4DA]">
+            <CheckCircle2 className="w-8 h-8 text-emerald-600 mx-auto mb-2" />
+            <h3 className="text-xs font-bold text-[#231815]">Pauta de hoje em dia!</h3>
+            <p className="text-xs text-[#73645B] mt-0.5 max-w-sm mx-auto">
+              Nenhuma etapa urgente agendada para hoje. Você pode adiantar demandas futuras ou cadastrar novos trabalhos.
+            </p>
           </div>
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {filteredTasks.map((task) => {
-              const statusCfg = TASK_STATUS_CONFIG[task.status];
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
+            {todayTasks.map((task) => {
               const priorityCfg = PRIORITY_CONFIG[task.priority];
               const urgency = getUrgencyBadge(task.deadlineDate, task.status);
-              const completedStages = task.stages.filter((s) => s.completed).length;
+              const nextActionText = getNextAction(task);
+              const todayStage = task.stages.find((s) => s.date === today && !s.completed);
+              const allAssignees = getAllTaskAssignees(task);
 
               return (
                 <div
-                  key={task.id}
-                  className="bg-white rounded-xl border border-[#EDE4DA] hover:border-[#6A3102]/40 transition-all p-4 shadow-xs flex flex-col justify-between space-y-3"
+                  key={`today-${task.id}`}
+                  className="p-4 rounded-xl border border-[#EDE4DA] bg-[#FAF7F2]/40 hover:bg-[#FAF7F2] hover:border-[#6A3102]/40 transition-all flex flex-col justify-between space-y-3 shadow-2xs"
                 >
-                  {/* Top line: Client and Priority */}
                   <div>
-                    <div className="flex items-center justify-between gap-2 mb-1.5">
-                      <span className="text-xs font-bold text-[#8C7A70] uppercase truncate">
-                        {task.client}
+                    {/* Top: Client/Project & Priority */}
+                    <div className="flex items-center justify-between text-xs mb-1">
+                      <span className="font-bold text-[#8C7A70] uppercase truncate">
+                        {task.client} {task.project ? `(${task.project})` : ''}
                       </span>
-                      <span
-                        className={`text-[11px] font-semibold ${priorityCfg.color} flex items-center gap-1 shrink-0`}
-                      >
+                      <span className={`text-[10px] font-semibold ${priorityCfg.color} flex items-center gap-1`}>
                         <span className={`w-1.5 h-1.5 rounded-full ${priorityCfg.dot}`} />
                         {priorityCfg.label}
                       </span>
@@ -442,99 +455,528 @@ export const Dashboard: React.FC<DashboardProps> = ({
                     {/* Task Title */}
                     <h3
                       onClick={() => onSelectTask(task)}
-                      className="font-bold text-sm text-[#231815] hover:text-[#6A3102] transition-colors cursor-pointer line-clamp-2"
+                      className="font-bold text-sm text-[#231815] hover:text-[#6A3102] transition-colors cursor-pointer line-clamp-1"
                     >
                       {task.title}
                     </h3>
-                  </div>
 
-                  {/* Badges & Meta info */}
-                  <div className="space-y-2 pt-1 border-t border-[#EDE4DA]/60">
-                    <div className="flex items-center justify-between text-xs">
-                      <span className="text-[#8C7A70]">Prazo Final:</span>
-                      <span
-                        className={`font-mono font-bold ${
-                          urgency.variant === 'overdue'
-                            ? 'text-red-700'
-                            : urgency.variant === 'today'
-                            ? 'text-orange-700'
-                            : 'text-[#231815]'
-                        }`}
-                      >
-                        {formatReadableDate(task.deadlineDate, false)} {task.deadlineTime}
+                    {/* Specialty & Schedule badge */}
+                    <div className="flex items-center gap-2 mt-1.5 flex-wrap">
+                      <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-[#EDE4DA] text-[#4A3B32]">
+                        {task.specialty || task.type}
                       </span>
-                    </div>
-
-                    <div className="flex items-center justify-between text-xs">
-                      <span className="text-[#8C7A70]">Carga Estimada:</span>
-                      <span className="font-mono text-[#5C4D44]">
-                        {formatHours(task.estimatedProductionHours)} prod. + {formatHours(task.estimatedAdjustmentHours)} aj.
-                      </span>
-                    </div>
-
-                    {/* Status & Urgency */}
-                    <div className="flex items-center justify-between gap-2 pt-1">
-                      <span
-                        className={`text-[11px] px-2 py-0.5 rounded font-medium border ${statusCfg.bg} ${statusCfg.text} ${statusCfg.border}`}
-                      >
-                        {statusCfg.label}
-                      </span>
-
-                      <span
-                        className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${
-                          urgency.variant === 'overdue'
-                            ? 'bg-red-100 text-red-800'
-                            : urgency.variant === 'today'
-                            ? 'bg-amber-100 text-amber-900'
-                            : 'bg-stone-100 text-stone-700'
-                        }`}
-                      >
-                        {urgency.label}
-                      </span>
-                    </div>
-
-                    {/* Progress indicator */}
-                    <div className="pt-1">
-                      <div className="flex justify-between text-[10px] font-mono text-[#8C7A70] mb-1">
-                        <span>Etapas</span>
-                        <span>
-                          {completedStages}/{task.stages.length} concluídas
+                      {todayStage && (
+                        <span className="text-[10px] font-mono text-[#6A3102] font-semibold flex items-center gap-1 bg-[#6A3102]/10 px-2 py-0.5 rounded">
+                          <Clock className="w-2.5 h-2.5" />
+                          {todayStage.startTime} - {todayStage.endTime}
                         </span>
+                      )}
+                    </div>
+
+                    {/* Entregáveis chips if any */}
+                    {task.deliverables && task.deliverables.length > 0 && (
+                      <div className="flex items-center gap-1 mt-2 flex-wrap">
+                        {task.deliverables.map((d) => (
+                          <span
+                            key={d.id}
+                            className={`text-[9px] px-1.5 py-0.5 rounded font-medium border ${
+                              d.completed || d.status === 'delivered' || d.status === 'finalized'
+                                ? 'bg-emerald-50 text-emerald-800 border-emerald-200 line-through'
+                                : 'bg-white text-[#6A3102] border-[#EDE4DA]'
+                            }`}
+                          >
+                            {d.title}
+                          </span>
+                        ))}
                       </div>
-                      <div className="w-full h-1.5 rounded-full bg-[#EDE4DA] overflow-hidden">
-                        <div
-                          className="h-full bg-[#6A3102] transition-all"
-                          style={{
-                            width: `${(completedStages / (task.stages.length || 1)) * 100}%`
-                          }}
-                        />
-                      </div>
+                    )}
+                  </div>
+
+                  {/* Highlighted Next Action (Requested: Próxima Ação) */}
+                  <div className="p-2.5 rounded-lg bg-white border border-[#EDE4DA] text-xs space-y-1">
+                    <span className="text-[10px] font-bold text-[#8C7A70] uppercase tracking-wider block">
+                      Próxima Ação:
+                    </span>
+                    <div className="flex items-center gap-2 text-[#231815] font-semibold text-xs">
+                      <Play className="w-3 h-3 text-[#6A3102] shrink-0 fill-[#6A3102]" />
+                      <span className="truncate">{nextActionText}</span>
                     </div>
                   </div>
 
-                  {/* Actions row */}
-                  <div className="pt-2 border-t border-[#EDE4DA] flex items-center justify-between gap-2 text-xs">
-                    <button
-                      onClick={() => onOpenReschedule(task)}
-                      title="Replanejar se atrasar"
-                      className="text-[#73645B] hover:text-[#6A3102] flex items-center gap-1 transition-colors cursor-pointer"
-                    >
-                      <RefreshCw className="w-3.5 h-3.5" />
-                      <span>Replanejar</span>
-                    </button>
+                  {/* Bottom: Assignee, Status & Action button */}
+                  <div className="pt-2 border-t border-[#EDE4DA]/70 flex items-center justify-between text-xs">
+                    <div className="flex items-center gap-1.5 text-[#5C4D44] truncate">
+                      <User className="w-3.5 h-3.5 text-[#8C7A70]" />
+                      <span className="font-medium truncate">{allAssignees.join(', ')}</span>
+                    </div>
 
                     <button
                       onClick={() => onSelectTask(task)}
-                      className="px-2.5 py-1 text-xs font-semibold text-[#6A3102] hover:bg-[#FAF7F2] rounded-lg border border-[#EDE4DA] flex items-center gap-1 cursor-pointer"
+                      className="px-2.5 py-1 text-xs font-semibold text-[#6A3102] hover:bg-white rounded-lg border border-[#EDE4DA] flex items-center gap-1 cursor-pointer shrink-0"
                     >
                       <Eye className="w-3.5 h-3.5" />
-                      <span>Ver Cronograma</span>
+                      <span>Detalhes</span>
                     </button>
                   </div>
                 </div>
               );
             })}
           </div>
+        )}
+      </div>
+
+      {/* 4. Filter & Search Controls */}
+      <div className="bg-white p-4 rounded-xl border border-[#EDE4DA] space-y-3 shadow-xs">
+        {/* Status Tabs */}
+        <div className="flex items-center gap-2 overflow-x-auto pb-1 text-xs">
+          {[
+            { id: 'all', label: 'Todas as Demandas', count: tasks.length },
+            { id: 'in_production', label: 'Em Produção', count: inProductionTasks.length },
+            { id: 'awaiting_approval', label: 'Aguardando Aprovação', count: awaitingApprovalTasks.length },
+            { id: 'overdue', label: 'Atrasadas', count: overdueTasks.length },
+            { id: 'completed', label: 'Concluídas', count: completedTasks.length }
+          ].map((tab) => (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTabFilter(tab.id as any)}
+              className={`px-3 py-1.5 rounded-lg font-medium whitespace-nowrap transition-colors flex items-center gap-1.5 cursor-pointer ${
+                activeTabFilter === tab.id
+                  ? 'bg-[#6A3102] text-white shadow-2xs font-semibold'
+                  : 'bg-[#FAF7F2] text-[#73645B] hover:text-[#231815] hover:bg-[#EDE4DA]'
+              }`}
+            >
+              <span>{tab.label}</span>
+              <span
+                className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono ${
+                  activeTabFilter === tab.id ? 'bg-white/20 text-white' : 'bg-[#EDE4DA] text-[#4A3B32]'
+                }`}
+              >
+                {tab.count}
+              </span>
+            </button>
+          ))}
+        </div>
+
+        {/* Secondary filters: Search, Member, Category, Priority */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5 pt-2 border-t border-[#EDE4DA] text-xs">
+          {/* Search Input */}
+          <div className="relative">
+            <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-[#8C7A70]" />
+            <input
+              type="text"
+              placeholder="Buscar demanda, cliente, entregável..."
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              className="w-full pl-8 pr-3 py-2 border border-[#EDE4DA] rounded-lg bg-[#FAF7F2] text-[#231815] placeholder-[#8C7A70] focus:outline-none focus:ring-1 focus:ring-[#6A3102]"
+            />
+          </div>
+
+          {/* Filter by Member */}
+          <select
+            value={memberFilter}
+            onChange={(e) => setMemberFilter(e.target.value)}
+            className="border border-[#EDE4DA] rounded-lg px-2.5 py-2 bg-[#FAF7F2] text-[#231815] font-medium"
+          >
+            <option value="all">Todos os Integrantes da Equipe</option>
+            {activeGroup?.members.map((m) => (
+              <option key={m.id} value={m.name}>
+                {m.name} ({m.specialty})
+              </option>
+            ))}
+          </select>
+
+          {/* Filter by Category */}
+          <select
+            value={categoryFilter}
+            onChange={(e) => setCategoryFilter(e.target.value)}
+            className="border border-[#EDE4DA] rounded-lg px-2.5 py-2 bg-[#FAF7F2] text-[#231815] font-medium"
+          >
+            <option value="all">Todas as Categorias</option>
+            {categories.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.name}
+              </option>
+            ))}
+          </select>
+
+          {/* Filter by Priority */}
+          <select
+            value={priorityFilter}
+            onChange={(e) => setPriorityFilter(e.target.value)}
+            className="border border-[#EDE4DA] rounded-lg px-2.5 py-2 bg-[#FAF7F2] text-[#231815] font-medium"
+          >
+            <option value="all">Todas as Prioridades</option>
+            <option value="urgent">Urgente</option>
+            <option value="high">Alta</option>
+            <option value="normal">Normal</option>
+            <option value="low">Baixa</option>
+          </select>
+        </div>
+      </div>
+
+      {/* 5. Main Demands Grid or Individual Deliverables Grid with Mode Toggle */}
+      <div className="space-y-3">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between px-1 gap-2">
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-bold text-[#5C4D44] uppercase tracking-wider">
+              {viewMode === 'demands'
+                ? `Demandas Principais (${filteredTasks.length})`
+                : `Entregáveis Individuais (${individualDeliverables.length})`}
+            </span>
+            <span className="text-[11px] text-[#8C7A70] hidden sm:inline">
+              · {viewMode === 'demands' ? 'Visão consolidada com chips de entregáveis' : 'Cada trabalho em card individual'}
+            </span>
+          </div>
+
+          {/* View mode toggle: Demandas Principais vs Entregáveis Individuais */}
+          <div className="flex items-center bg-[#FAF7F2] p-0.5 rounded-lg border border-[#EDE4DA] text-xs self-start sm:self-auto">
+            <button
+              onClick={() => setViewMode('demands')}
+              className={`px-3 py-1 rounded-md font-semibold transition-all cursor-pointer flex items-center gap-1.5 ${
+                viewMode === 'demands'
+                  ? 'bg-[#6A3102] text-white shadow-2xs'
+                  : 'text-[#73645B] hover:text-[#231815]'
+              }`}
+            >
+              <FolderKanban className="w-3.5 h-3.5" />
+              <span>Demandas Principais</span>
+            </button>
+            <button
+              onClick={() => setViewMode('deliverables')}
+              className={`px-3 py-1 rounded-md font-semibold transition-all cursor-pointer flex items-center gap-1.5 ${
+                viewMode === 'deliverables'
+                  ? 'bg-[#6A3102] text-white shadow-2xs'
+                  : 'text-[#73645B] hover:text-[#231815]'
+              }`}
+            >
+              <Package className="w-3.5 h-3.5" />
+              <span>Entregáveis Individuais</span>
+            </button>
+          </div>
+        </div>
+
+        {/* View Mode: DEMANDAS PRINCIPAIS */}
+        {viewMode === 'demands' && (
+          <>
+            {filteredTasks.length === 0 ? (
+              <div className="bg-white p-12 rounded-2xl border border-[#EDE4DA] text-center shadow-xs">
+                {tasks.length === 0 ? (
+                  <div className="max-w-md mx-auto space-y-3">
+                    <div className="w-12 h-12 rounded-xl bg-[#6A3102]/10 text-[#6A3102] flex items-center justify-center mx-auto">
+                      <Plus className="w-6 h-6" />
+                    </div>
+                    <h3 className="text-base font-bold text-[#231815]">Nenhuma demanda cadastrada</h3>
+                    <p className="text-xs text-[#73645B] leading-relaxed">
+                      Cadastre sua primeira demanda com múltiplos tipos de trabalho (como Carrossel, Story e Reels) para calcular automaticamente o cronograma inteligente!
+                    </p>
+                    <div className="pt-2">
+                      <button
+                        onClick={onOpenNewTask}
+                        className="px-4 py-2.5 text-xs font-semibold rounded-lg bg-[#6A3102] hover:bg-[#542601] text-white shadow-xs inline-flex items-center gap-2 transition-colors cursor-pointer"
+                      >
+                        <Plus className="w-4 h-4" />
+                        <span>Cadastrar Demanda com Entregáveis</span>
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-xs text-[#8C7A70]">Nenhuma demanda encontrada com os filtros selecionados.</p>
+                )}
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                {filteredTasks.map((task) => {
+                  const statusCfg = TASK_STATUS_CONFIG[task.status] || TASK_STATUS_CONFIG.todo;
+                  const priorityCfg = PRIORITY_CONFIG[task.priority];
+                  const urgency = getUrgencyBadge(task.deadlineDate, task.status);
+                  const completedStages = task.stages.filter((s) => s.completed).length;
+                  const nextAction = getNextAction(task);
+                  const delivSummary = calculateDeliverablesProgress(task.deliverables);
+                  const allAssignees = getAllTaskAssignees(task);
+
+                  return (
+                    <div
+                      key={task.id}
+                      className="bg-white rounded-2xl border border-[#EDE4DA] hover:border-[#6A3102]/40 transition-all p-5 shadow-xs flex flex-col justify-between space-y-3.5 group"
+                    >
+                      {/* Top: Client/Project & Priority */}
+                      <div>
+                        <div className="flex items-center justify-between gap-2 mb-1.5">
+                          <span className="text-xs font-bold text-[#8C7A70] uppercase truncate">
+                            {task.client} {task.project ? `(${task.project})` : ''}
+                          </span>
+                          <span className={`text-[11px] font-semibold ${priorityCfg.color} flex items-center gap-1 shrink-0`}>
+                            <span className={`w-1.5 h-1.5 rounded-full ${priorityCfg.dot}`} />
+                            {priorityCfg.label}
+                          </span>
+                        </div>
+
+                        {/* Task Title */}
+                        <h3
+                          onClick={() => onSelectTask(task)}
+                          className="font-bold text-sm text-[#231815] group-hover:text-[#6A3102] transition-colors cursor-pointer line-clamp-2 leading-snug"
+                        >
+                          {task.title}
+                        </h3>
+
+                        {/* Specialty & Equipe */}
+                        <div className="flex items-center gap-2 mt-2 flex-wrap">
+                          <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-[#EDE4DA] text-[#4A3B32]">
+                            {task.specialty || task.type}
+                          </span>
+                          <div className="flex items-center gap-1 text-[11px] text-[#73645B]">
+                            <Users className="w-3 h-3 text-[#8C7A70]" />
+                            <span className="truncate">{allAssignees.join(', ')}</span>
+                          </div>
+                        </div>
+
+                        {/* Entregáveis Chips (Requested in prompt: [Carrossel] [Story] [Reels]) */}
+                        {task.deliverables && task.deliverables.length > 0 && (
+                          <div className="pt-2.5 mt-2 border-t border-[#EDE4DA]/60 space-y-1.5">
+                            <div className="flex items-center justify-between text-[10px] text-[#8C7A70] uppercase tracking-wider font-bold">
+                              <span>Entregáveis ({task.deliverables.length})</span>
+                              <span className="text-[#6A3102] font-semibold">
+                                {delivSummary.completed}/{delivSummary.total} concluídos
+                              </span>
+                            </div>
+
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              {task.deliverables.map((d) => {
+                                const isDone = d.completed || d.status === 'delivered' || d.status === 'finalized';
+                                return (
+                                  <span
+                                    key={d.id}
+                                    className={`text-[10px] px-2 py-0.5 rounded-md font-medium border ${
+                                      isDone
+                                        ? 'bg-emerald-50 border-emerald-200 text-emerald-800 line-through'
+                                        : 'bg-[#FAF7F2] border-[#EDE4DA] text-[#231815]'
+                                    }`}
+                                  >
+                                    {d.title}
+                                  </span>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Summary & Next Action */}
+                      <div className="space-y-2 pt-2 border-t border-[#EDE4DA]/60 text-xs">
+                        {/* Next Action Box */}
+                        <div className="p-2.5 rounded-lg bg-[#FAF7F2] border border-[#EDE4DA]/80">
+                          <span className="text-[10px] font-bold text-[#8C7A70] uppercase tracking-wider block">
+                            Próxima Ação:
+                          </span>
+                          <span className="font-semibold text-xs text-[#231815] block truncate mt-0.5">
+                            {nextAction}
+                          </span>
+                        </div>
+
+                        {/* Prazo & Status */}
+                        <div className="flex items-center justify-between pt-1">
+                          <span className="text-[#8C7A70]">Prazo Final:</span>
+                          <span
+                            className={`font-mono font-bold ${
+                              urgency.variant === 'overdue'
+                                ? 'text-red-700'
+                                : urgency.variant === 'today'
+                                ? 'text-amber-800'
+                                : 'text-[#231815]'
+                            }`}
+                          >
+                            {formatReadableDate(task.deadlineDate, false)} {task.deadlineTime}
+                          </span>
+                        </div>
+
+                        <div className="flex items-center justify-between gap-2 pt-0.5">
+                          <span
+                            className={`text-[11px] px-2 py-0.5 rounded font-medium border ${statusCfg.bg} ${statusCfg.text} ${statusCfg.border}`}
+                          >
+                            {statusCfg.label}
+                          </span>
+
+                          <span
+                            className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${
+                              urgency.variant === 'overdue'
+                                ? 'bg-red-100 text-red-800'
+                                : urgency.variant === 'today'
+                                ? 'bg-amber-100 text-amber-900'
+                                : 'bg-stone-100 text-stone-700'
+                            }`}
+                          >
+                            {urgency.label}
+                          </span>
+                        </div>
+
+                        {/* Progress Bar (Entregáveis ou Etapas) */}
+                        <div className="pt-1">
+                          <div className="flex justify-between text-[10px] font-mono text-[#8C7A70] mb-1">
+                            <span>
+                              {task.deliverables?.length ? 'Progresso dos entregáveis' : 'Progresso das etapas'}
+                            </span>
+                            <span>
+                              {task.deliverables?.length
+                                ? `${delivSummary.completed}/${delivSummary.total} (${delivSummary.progressPercent}%)`
+                                : `${completedStages}/${task.stages.length}`}
+                            </span>
+                          </div>
+                          <div className="w-full h-1.5 rounded-full bg-[#EDE4DA] overflow-hidden">
+                            <div
+                              className="h-full bg-[#6A3102] transition-all rounded-full"
+                              style={{
+                                width: `${task.deliverables?.length ? delivSummary.progressPercent : task.stages.length ? Math.round((completedStages / task.stages.length) * 100) : 0}%`
+                              }}
+                            />
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Actions Row */}
+                      <div className="pt-2 border-t border-[#EDE4DA] flex items-center justify-between gap-2 text-xs">
+                        <button
+                          onClick={() => onOpenReschedule(task)}
+                          title="Replanejar cronograma"
+                          className="text-[#73645B] hover:text-[#6A3102] flex items-center gap-1 transition-colors cursor-pointer"
+                        >
+                          <RefreshCw className="w-3.5 h-3.5" />
+                          <span>Replanejar</span>
+                        </button>
+
+                        <button
+                          onClick={() => onSelectTask(task)}
+                          className="px-3 py-1.5 text-xs font-semibold text-[#6A3102] hover:bg-[#FAF7F2] rounded-lg border border-[#EDE4DA] flex items-center gap-1.5 cursor-pointer shadow-2xs"
+                        >
+                          <Eye className="w-3.5 h-3.5" />
+                          <span>Ver Demanda</span>
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </>
+        )}
+
+        {/* View Mode: ENTREGÁVEIS INDIVIDUAIS (Requested: permitir filtrar ou visualizar entregáveis individualmente) */}
+        {viewMode === 'deliverables' && (
+          <>
+            {individualDeliverables.length === 0 ? (
+              <div className="bg-white p-12 rounded-2xl border border-[#EDE4DA] text-center shadow-xs space-y-2">
+                <Package className="w-8 h-8 text-[#8C7A70] mx-auto" />
+                <h3 className="text-sm font-bold text-[#231815]">Nenhum entregável individual encontrado</h3>
+                <p className="text-xs text-[#73645B]">
+                  Cadastre tipos de trabalho nas demandas para visualizar cada entrega de forma separada nesta aba.
+                </p>
+                <button
+                  onClick={onOpenNewTask}
+                  className="px-4 py-2 text-xs font-semibold bg-[#6A3102] text-white rounded-lg inline-flex items-center gap-1 mt-2 cursor-pointer"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>Cadastrar Demanda com Entregáveis</span>
+                </button>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
+                {individualDeliverables.map(({ deliverable: d, parentTask }) => {
+                  const dStatus = TASK_STATUS_CONFIG[d.status] || TASK_STATUS_CONFIG.todo;
+                  const isDone = d.completed || d.status === 'delivered' || d.status === 'finalized';
+                  const urgency = getUrgencyBadge(d.deadlineDate, d.status);
+
+                  return (
+                    <div
+                      key={`indiv-${d.id}`}
+                      className={`p-4 rounded-xl border bg-white shadow-xs flex flex-col justify-between space-y-3 transition-all hover:border-[#6A3102]/50 ${
+                        isDone ? 'opacity-75 bg-[#FAF7F2]/40' : ''
+                      }`}
+                    >
+                      <div>
+                        {/* Parent Demand Link */}
+                        <div className="flex items-center justify-between gap-2 text-xs mb-1">
+                          <span
+                            onClick={() => onSelectTask(parentTask)}
+                            className="font-bold text-[#8C7A70] uppercase truncate hover:text-[#6A3102] cursor-pointer"
+                          >
+                            {parentTask.client} › {parentTask.title}
+                          </span>
+                          <span
+                            className={`text-[9px] px-1.5 py-0.2 rounded font-semibold ${
+                              urgency.variant === 'overdue'
+                                ? 'bg-red-100 text-red-800'
+                                : urgency.variant === 'today'
+                                ? 'bg-amber-100 text-amber-900'
+                                : 'bg-stone-100 text-stone-700'
+                            }`}
+                          >
+                            {urgency.label}
+                          </span>
+                        </div>
+
+                        {/* Deliverable Title */}
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => handleToggleDeliverable(parentTask, d.id)}
+                            className={`w-5 h-5 rounded-md border flex items-center justify-center transition-colors shrink-0 cursor-pointer ${
+                              isDone
+                                ? 'bg-emerald-600 border-emerald-600 text-white'
+                                : 'border-[#C8B8A6] hover:border-[#6A3102] bg-white'
+                            }`}
+                          >
+                            {isDone && <Check className="w-3.5 h-3.5 stroke-[3]" />}
+                          </button>
+                          <h3
+                            onClick={() => onSelectTask(parentTask)}
+                            className={`font-bold text-sm text-[#231815] hover:text-[#6A3102] cursor-pointer truncate ${
+                              isDone ? 'line-through text-[#8C7A70]' : ''
+                            }`}
+                          >
+                            {d.title}
+                          </h3>
+                        </div>
+
+                        {/* Specialty Badge & Assignee */}
+                        <div className="flex items-center gap-2 mt-2 flex-wrap text-xs">
+                          <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-[#EDE4DA] text-[#4A3B32]">
+                            {d.specialty}
+                          </span>
+                          <span className="flex items-center gap-1 text-[11px] text-[#73645B]">
+                            <User className="w-3 h-3 text-[#8C7A70]" />
+                            <strong className="text-[#231815]">{d.assignee}</strong>
+                          </span>
+                        </div>
+
+                        {d.description && (
+                          <p className="text-[11px] text-[#8C7A70] italic mt-2 line-clamp-2">
+                            {d.description}
+                          </p>
+                        )}
+                      </div>
+
+                      {/* Bottom Info: Prazo, Horas, Status */}
+                      <div className="pt-2 border-t border-[#EDE4DA]/70 flex items-center justify-between text-xs">
+                        <div className="space-y-0.5">
+                          <span className="text-[10px] text-[#8C7A70] block">Prazo Individual:</span>
+                          <span className="font-mono font-bold text-[#231815]">
+                            {formatReadableDate(d.deadlineDate, false)} {d.deadlineTime || ''} ({d.estimatedHours}h)
+                          </span>
+                        </div>
+
+                        <button
+                          onClick={() => onSelectTask(parentTask)}
+                          className="px-2.5 py-1 text-xs font-semibold text-[#6A3102] hover:bg-[#FAF7F2] rounded-lg border border-[#EDE4DA] flex items-center gap-1 cursor-pointer"
+                        >
+                          <Eye className="w-3 h-3" />
+                          <span>Ver</span>
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </>
         )}
       </div>
     </div>
